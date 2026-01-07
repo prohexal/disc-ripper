@@ -470,7 +470,8 @@ class DiscRipperGUI:
                                            maximum=100)
         self.progress_bar.pack(fill=tk.X, pady=5)
         
-        self.progress_label = ttk.Label(progress_frame, text="Ready")
+        # Progress label with percentage
+        self.progress_label = ttk.Label(progress_frame, text="Ready - 0%", font=('', 10))
         self.progress_label.pack()
         
         # Log output with collapse/expand
@@ -1117,7 +1118,7 @@ class DiscRipperGUI:
         else:
             # Step 1: Rip with MakeMKV
             self.log("Step 1: Ripping disc with MakeMKV...")
-            self.progress_label.config(text="Ripping disc...")
+            self.progress_label.config(text="Ripping disc - 10%")
             self.progress_var.set(10)
             
             # Clean up any existing files in temp directory to avoid MakeMKV prompts
@@ -1141,7 +1142,9 @@ class DiscRipperGUI:
                 if "Progress" in line:
                     try:
                         progress = int(re.search(r'(\d+)%', line).group(1))
-                        self.progress_var.set(10 + progress * 0.4)  # 10-50%
+                        overall = int(10 + progress * 0.4)  # 10-50%
+                        self.progress_var.set(overall)
+                        self.progress_label.config(text=f"Ripping disc - {overall}%")
                     except:
                         pass
             
@@ -1164,7 +1167,7 @@ class DiscRipperGUI:
         
         # Step 2: Encode with FFmpeg
         self.log("Step 2: Encoding to AV1...")
-        self.progress_label.config(text="Encoding to AV1...")
+        self.progress_label.config(text="Encoding - 50%")
         self.progress_var.set(50)
         
         output_file = output_folder / f"{movie_name}.mkv"
@@ -1301,7 +1304,17 @@ class DiscRipperGUI:
                     h, m, s = map(int, match.groups())
                     current = h * 3600 + m * 60 + s
                     progress = (current / duration) * 100
-                    self.progress_var.set(50 + progress * 0.5)  # 50-100%
+                    overall = int(50 + progress * 0.5)  # 50-100%
+                    self.progress_var.set(overall)
+                    # Calculate ETA
+                    elapsed = current
+                    if progress > 0:
+                        total_time = (elapsed / progress) * 100
+                        remaining = int(total_time - elapsed)
+                        eta_min = remaining // 60
+                        self.progress_label.config(text=f"Encoding - {overall}% (ETA: {eta_min}min)")
+                    else:
+                        self.progress_label.config(text=f"Encoding - {overall}%")
         
         process.wait()
         self.running_processes.remove(process)
@@ -1312,7 +1325,7 @@ class DiscRipperGUI:
         # Success - keep temp file for potential re-encoding
         self.log(f"\n✓ Complete! Output: {output_file}")
         self.log(f"Temp file kept at: {input_file} (for re-encoding with different settings)")
-        self.progress_label.config(text="Complete!")
+        self.progress_label.config(text="Complete - 100%")
         self.progress_var.set(100)
         
         # Update ripped file status
