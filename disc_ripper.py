@@ -40,6 +40,9 @@ class DiscRipperGUI:
         self.root.title("Disc Ripper - AV1 Encoder")
         self.root.geometry("900x700")
         
+        # Track running processes for cleanup
+        self.running_processes = []
+        
         # Setup menu bar
         self.setup_menu()
         
@@ -55,9 +58,29 @@ class DiscRipperGUI:
         self.setup_ui()
         self.check_dependencies()
         
+        # Register cleanup on window close
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
         # Check for MakeMKV on first run
         if not self.makemkv_path:
             self.prompt_makemkv_install()
+    
+    def on_closing(self):
+        """Clean up processes and close the application"""
+        # Kill any running processes
+        for process in self.running_processes:
+            try:
+                if process.poll() is None:  # Process is still running
+                    process.terminate()
+                    process.wait(timeout=2)
+            except:
+                try:
+                    process.kill()  # Force kill if terminate fails
+                except:
+                    pass
+        
+        # Destroy the window
+        self.root.destroy()
     
     def find_makemkv(self) -> Optional[str]:
         """Find MakeMKV command line tool"""
@@ -345,6 +368,41 @@ class DiscRipperGUI:
         ttk.Radiobutton(video_frame, text="Encode to AV1", 
                        variable=self.video_mode_var, value="encode").pack(side=tk.LEFT, padx=10)
         
+        # Quality preset
+        quality_frame = ttk.LabelFrame(self.encode_frame, text="Quality Preset", padding=10)
+        quality_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        ttk.Label(quality_frame, text="Preset:").pack(side=tk.LEFT, padx=5)
+        self.quality_preset_var = tk.StringVar(value="balanced")
+        quality_presets = [
+            ("Maximum (AV1, Slow, Smallest)", "maximum"),
+            ("High (AV1, Medium, Small)", "high"),
+            ("Balanced (AV1, Medium, Good)", "balanced"),
+            ("Fast (AV1, Fast, Larger)", "fast"),
+            ("Hardware (H.265, Very Fast)", "hardware")
+        ]
+        preset_menu = ttk.Combobox(quality_frame, textvariable=self.quality_preset_var, 
+                                  values=[p[1] for p in quality_presets], state="readonly", width=30)
+        preset_menu.pack(side=tk.LEFT, padx=5)
+        
+        # Bind to show description
+        def show_preset_info(event=None):
+            preset = self.quality_preset_var.get()
+            descriptions = {
+                "maximum": "AV1 Preset 4, CRF 20 - Best quality, ~4hr for 2hr movie",
+                "high": "AV1 Preset 6, CRF 25 - Excellent quality, ~2.5hr for 2hr movie",
+                "balanced": "AV1 Preset 8, CRF 30 - Very good quality, ~1.5hr for 2hr movie",
+                "fast": "AV1 Preset 10, CRF 35 - Good quality, ~50min for 2hr movie",
+                "hardware": "H.265 VideoToolbox - Excellent quality, ~15min for 2hr movie"
+            }
+            preset_info_label.config(text=descriptions.get(preset, ""))
+        
+        preset_menu.bind("<<ComboboxSelected>>", show_preset_info)
+        
+        preset_info_label = ttk.Label(quality_frame, text="", foreground="gray")
+        preset_info_label.pack(side=tk.LEFT, padx=10)
+        show_preset_info()  # Show initial description
+        
         # Resolution
         res_frame = ttk.LabelFrame(self.encode_frame, text="Resolution", padding=10)
         res_frame.pack(fill=tk.X, padx=10, pady=10)
@@ -378,9 +436,28 @@ class DiscRipperGUI:
         ttk.Checkbutton(chapter_frame, text="Include chapter markers", 
                        variable=self.include_chapters_var).pack()
         
-        # Start encoding
-        ttk.Button(self.encode_frame, text="Start Encoding", 
-                  command=self.start_encoding, style="Accent.TButton").pack(pady=20)
+        # Ripped file status
+        self.ripped_status_frame = ttk.LabelFrame(self.encode_frame, text="Ripped File Status", padding=10)
+        self.ripped_status_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        self.ripped_status_label = ttk.Label(self.ripped_status_frame, text="No ripped file found", foreground="gray")
+        self.ripped_status_label.pack()
+        
+        # Buttons frame
+        buttons_frame = ttk.Frame(self.encode_frame)
+        buttons_frame.pack(pady=20)
+        
+        # Start encoding (rip + encode)
+        ttk.Button(buttons_frame, text="Rip & Encode", 
+                  command=self.start_encoding, style="Accent.TButton").pack(side=tk.LEFT, padx=5)
+        
+        # Re-encode only button
+        self.reencode_button = ttk.Button(buttons_frame, text="Re-encode Only (Skip Rip)", 
+                                         command=self.start_reencoding, state="disabled")
+        self.reencode_button.pack(side=tk.LEFT, padx=5)
+        
+        # Check for existing ripped file on tab change
+        self.root.nametowidget(".!notebook").bind("<<NotebookTabChanged>>", lambda e: self.check_ripped_file())
     
     def setup_output_tab(self):
         """Setup output and progress tab"""
@@ -393,15 +470,40 @@ class DiscRipperGUI:
                                            maximum=100)
         self.progress_bar.pack(fill=tk.X, pady=5)
         
-        self.progress_label = ttk.Label(progress_frame, text="Ready")
+        # Progress label with percentage
+        self.progress_label = ttk.Label(progress_frame, text="Ready - 0%", font=('', 10))
         self.progress_label.pack()
         
-        # Log output
-        log_frame = ttk.LabelFrame(self.output_frame, text="Log", padding=10)
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # Log output with collapse/expand
+        log_header_frame = ttk.Frame(self.output_frame)
+        log_header_frame.pack(fill=tk.X, padx=10, pady=(10, 0))
         
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=20, wrap=tk.WORD)
+        ttk.Label(log_header_frame, text="Log", font=('', 10, 'bold')).pack(side=tk.LEFT, padx=5)
+        
+        self.log_expanded = tk.BooleanVar(value=True)
+        self.log_toggle_button = ttk.Button(log_header_frame, text="Hide", 
+                                           command=self.toggle_log, width=10)
+        self.log_toggle_button.pack(side=tk.RIGHT, padx=5)
+        
+        # Log frame that can be hidden
+        self.log_frame = ttk.Frame(self.output_frame)
+        self.log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        
+        self.log_text = scrolledtext.ScrolledText(self.log_frame, height=20, wrap=tk.WORD)
         self.log_text.pack(fill=tk.BOTH, expand=True)
+    
+    def toggle_log(self):
+        """Toggle log visibility"""
+        if self.log_expanded.get():
+            # Hide log
+            self.log_frame.pack_forget()
+            self.log_toggle_button.config(text="Show")
+            self.log_expanded.set(False)
+        else:
+            # Show log
+            self.log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+            self.log_toggle_button.config(text="Hide")
+            self.log_expanded.set(True)
     
     def log(self, message: str):
         """Add message to log"""
@@ -921,6 +1023,26 @@ class DiscRipperGUI:
         except Exception as e:
             self.log(f"Failed to load cover art: {e}")
     
+    def check_ripped_file(self):
+        """Check if a ripped MKV file exists in temp directory"""
+        temp_dir = Path.home() / "tmp" / "disc_rip"
+        mkv_files = list(temp_dir.glob("*.mkv")) if temp_dir.exists() else []
+        
+        if mkv_files:
+            file = mkv_files[0]
+            size_mb = file.stat().st_size / (1024 * 1024)
+            self.ripped_status_label.config(
+                text=f"✓ Found: {file.name} ({size_mb:.1f} MB)",
+                foreground="green"
+            )
+            self.reencode_button.config(state="normal")
+        else:
+            self.ripped_status_label.config(
+                text="No ripped file found",
+                foreground="gray"
+            )
+            self.reencode_button.config(state="disabled")
+    
     def browse_output(self):
         """Browse for output folder"""
         folder = filedialog.askdirectory(initialdir=self.output_folder_var.get())
@@ -942,62 +1064,110 @@ class DiscRipperGUI:
         
         def encode_thread():
             try:
-                self.rip_and_encode()
+                self.rip_and_encode(skip_rip=False)
             except Exception as e:
                 self.log(f"Error: {str(e)}")
                 self.progress_label.config(text="Failed")
         
         threading.Thread(target=encode_thread, daemon=True).start()
     
-    def rip_and_encode(self):
+    def start_reencoding(self):
+        """Start encoding without ripping (use existing temp file)"""
+        if not self.ffmpeg_path:
+            messagebox.showerror("Error", "FFmpeg not found! Install with: brew install ffmpeg")
+            return
+        
+        # Check temp file still exists
+        temp_dir = Path.home() / "tmp" / "disc_rip"
+        mkv_files = list(temp_dir.glob("*.mkv")) if temp_dir.exists() else []
+        
+        if not mkv_files:
+            messagebox.showerror("Error", "No ripped file found. Please rip the disc first.")
+            return
+        
+        # Switch to progress tab
+        self.root.nametowidget(".!notebook").select(2)
+        
+        def encode_thread():
+            try:
+                self.rip_and_encode(skip_rip=True)
+            except Exception as e:
+                self.log(f"Error: {str(e)}")
+                self.progress_label.config(text="Failed")
+        
+        threading.Thread(target=encode_thread, daemon=True).start()
+    
+    def rip_and_encode(self, skip_rip=False):
         """Rip disc with MakeMKV and encode to AV1"""
         movie_name = self.movie_name_var.get()
         output_folder = Path(self.output_folder_var.get())
         output_folder.mkdir(parents=True, exist_ok=True)
         
-        # Step 1: Rip with MakeMKV
-        self.log("Step 1: Ripping disc with MakeMKV...")
-        self.progress_label.config(text="Ripping disc...")
-        self.progress_var.set(10)
-        
         temp_dir = Path.home() / "tmp" / "disc_rip"
         temp_dir.mkdir(parents=True, exist_ok=True)
         
-        drive = self.drive_var.get()
-        cmd = [self.makemkv_path, "mkv", f"disc:{drive}", 
-               self.selected_title, str(temp_dir)]
-        
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, 
-                                  stderr=subprocess.PIPE, text=True)
-        
-        for line in process.stdout:
-            self.log(line.strip())
-            if "Progress" in line:
+        if skip_rip:
+            # Skip ripping, use existing file
+            self.log("Skipping rip, using existing file...")
+            mkv_files = list(temp_dir.glob("*.mkv"))
+            if not mkv_files:
+                raise Exception("No existing MKV file found")
+            input_file = mkv_files[0]
+            self.log(f"Using existing rip: {input_file}")
+            self.progress_var.set(50)
+        else:
+            # Step 1: Rip with MakeMKV
+            self.log("Step 1: Ripping disc with MakeMKV...")
+            self.progress_label.config(text="Ripping disc - 10%")
+            self.progress_var.set(10)
+            
+            # Clean up any existing files in temp directory to avoid MakeMKV prompts
+            for old_file in temp_dir.glob("*.mkv"):
                 try:
-                    progress = int(re.search(r'(\d+)%', line).group(1))
-                    self.progress_var.set(10 + progress * 0.4)  # 10-50%
-                except:
-                    pass
-        
-        process.wait()
-        
-        if process.returncode != 0:
-            raise Exception("MakeMKV ripping failed")
-        
-        # Find the ripped MKV file
-        mkv_files = list(temp_dir.glob("*.mkv"))
-        if not mkv_files:
-            raise Exception("No MKV file found after ripping")
-        
-        input_file = mkv_files[0]
-        self.log(f"Ripped to: {input_file}")
+                    old_file.unlink()
+                    self.log(f"Cleaned up old temp file: {old_file.name}")
+                except Exception as e:
+                    self.log(f"Warning: Could not delete {old_file.name}: {e}")
+            
+            drive = self.drive_var.get()
+            cmd = [self.makemkv_path, "mkv", f"disc:{drive}", 
+                   self.selected_title, str(temp_dir)]
+            
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, 
+                                      stderr=subprocess.PIPE, text=True)
+            self.running_processes.append(process)
+            
+            for line in process.stdout:
+                self.log(line.strip())
+                if "Progress" in line:
+                    try:
+                        progress = int(re.search(r'(\d+)%', line).group(1))
+                        overall = int(10 + progress * 0.4)  # 10-50%
+                        self.progress_var.set(overall)
+                        self.progress_label.config(text=f"Ripping disc - {overall}%")
+                    except:
+                        pass
+            
+            process.wait()
+            self.running_processes.remove(process)
+            
+            if process.returncode != 0:
+                raise Exception("MakeMKV ripping failed")
+            
+            # Find the ripped MKV file
+            mkv_files = list(temp_dir.glob("*.mkv"))
+            if not mkv_files:
+                raise Exception("No MKV file found after ripping")
+            
+            input_file = mkv_files[0]
+            self.log(f"Ripped to: {input_file}")
         
         # Analyze input file for HDR/DV metadata
         video_info = self.analyze_video(input_file)
         
         # Step 2: Encode with FFmpeg
         self.log("Step 2: Encoding to AV1...")
-        self.progress_label.config(text="Encoding to AV1...")
+        self.progress_label.config(text="Encoding - 50%")
         self.progress_var.set(50)
         
         output_file = output_folder / f"{movie_name}.mkv"
@@ -1035,21 +1205,40 @@ class DiscRipperGUI:
         if use_copy:
             cmd.extend(["-c:v", "copy"])
             self.log("Using copy mode - original video preserved")
-        elif has_hdr:
-            self.log("Detected HDR - encoding with metadata preservation")
-            cmd.extend(["-c:v", "libsvtav1", "-preset", "6", "-crf", "30"])
-            # Preserve HDR metadata
-            cmd.extend([
-                "-color_primaries", str(video_info.get("color_primaries", "bt2020")),
-                "-color_trc", str(video_info.get("color_trc", "smpte2084")),
-                "-colorspace", str(video_info.get("colorspace", "bt2020nc"))
-            ])
-            # Copy HDR side data
-            if video_info.get("master_display"):
-                cmd.extend(["-x265-params", f"master-display={video_info['master_display']}"])
         else:
-            self.log("Standard video - encoding to AV1")
-            cmd.extend(["-c:v", "libsvtav1", "-preset", "6", "-crf", "30"])
+            # Get quality preset
+            preset = self.quality_preset_var.get()
+            preset_config = {
+                "maximum": {"encoder": "libsvtav1", "preset": "4", "crf": "20"},
+                "high": {"encoder": "libsvtav1", "preset": "6", "crf": "25"},
+                "balanced": {"encoder": "libsvtav1", "preset": "8", "crf": "30"},
+                "fast": {"encoder": "libsvtav1", "preset": "10", "crf": "35"},
+                "hardware": {"encoder": "hevc_videotoolbox", "preset": None, "crf": None}
+            }
+            
+            config = preset_config.get(preset, preset_config["balanced"])
+            
+            if config["encoder"] == "hevc_videotoolbox":
+                # Hardware acceleration with VideoToolbox
+                self.log(f"Using Hardware Acceleration (VideoToolbox H.265)")
+                cmd.extend(["-c:v", "hevc_videotoolbox", "-q:v", "65"])
+                # VideoToolbox quality: 0-100, 65 is good balance
+            else:
+                # Software AV1 encoding
+                if has_hdr:
+                    self.log(f"Encoding with {preset} preset (AV1) - HDR metadata preserved")
+                else:
+                    self.log(f"Encoding with {preset} preset (AV1)")
+                
+                cmd.extend(["-c:v", config["encoder"], "-preset", config["preset"], "-crf", config["crf"]])
+                
+                # Preserve HDR metadata for AV1
+                if has_hdr:
+                    cmd.extend([
+                        "-color_primaries", str(video_info.get("color_primaries", "bt2020")),
+                        "-color_trc", str(video_info.get("color_trc", "smpte2084")),
+                        "-colorspace", str(video_info.get("colorspace", "bt2020nc"))
+                    ])
         
         # Resolution (skip if using copy)
         resolution = self.resolution_var.get()
@@ -1082,8 +1271,9 @@ class DiscRipperGUI:
         # Subtitles - only include selected tracks
         selected_subs = self.subtitle_listbox.curselection()
         if selected_subs:
+            # Map each selected subtitle stream individually and ignore if it doesn't exist
             for idx in selected_subs:
-                cmd.extend(["-map", f"0:s:{idx}"])
+                cmd.extend(["-map", f"0:s:{idx}?"])  # The ? makes it optional
             cmd.extend(["-c:s", "copy"])
         # If no subtitles selected, don't include any
         
@@ -1094,6 +1284,7 @@ class DiscRipperGUI:
         
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, 
                                   stderr=subprocess.PIPE, text=True)
+        self.running_processes.append(process)
         
         duration = None
         for line in process.stderr:
@@ -1113,20 +1304,34 @@ class DiscRipperGUI:
                     h, m, s = map(int, match.groups())
                     current = h * 3600 + m * 60 + s
                     progress = (current / duration) * 100
-                    self.progress_var.set(50 + progress * 0.5)  # 50-100%
+                    overall = int(50 + progress * 0.5)  # 50-100%
+                    self.progress_var.set(overall)
+                    # Calculate ETA
+                    elapsed = current
+                    if progress > 0:
+                        total_time = (elapsed / progress) * 100
+                        remaining = int(total_time - elapsed)
+                        eta_min = remaining // 60
+                        self.progress_label.config(text=f"Encoding - {overall}% (ETA: {eta_min}min)")
+                    else:
+                        self.progress_label.config(text=f"Encoding - {overall}%")
         
         process.wait()
+        self.running_processes.remove(process)
         
         if process.returncode != 0:
             raise Exception("FFmpeg encoding failed")
         
-        # Cleanup
-        input_file.unlink()
+        # Success - keep temp file for potential re-encoding
         self.log(f"\n✓ Complete! Output: {output_file}")
-        self.progress_label.config(text="Complete!")
+        self.log(f"Temp file kept at: {input_file} (for re-encoding with different settings)")
+        self.progress_label.config(text="Complete - 100%")
         self.progress_var.set(100)
         
-        messagebox.showinfo("Success", f"Encoding complete!\n\nOutput: {output_file}")
+        # Update ripped file status
+        self.check_ripped_file()
+        
+        messagebox.showinfo("Success", f"Encoding complete!\n\nOutput: {output_file}\n\nTip: You can re-encode with different settings using 'Re-encode Only' button.")
 
 
 def main():
