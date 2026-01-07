@@ -436,9 +436,28 @@ class DiscRipperGUI:
         ttk.Checkbutton(chapter_frame, text="Include chapter markers", 
                        variable=self.include_chapters_var).pack()
         
-        # Start encoding
-        ttk.Button(self.encode_frame, text="Start Encoding", 
-                  command=self.start_encoding, style="Accent.TButton").pack(pady=20)
+        # Ripped file status
+        self.ripped_status_frame = ttk.LabelFrame(self.encode_frame, text="Ripped File Status", padding=10)
+        self.ripped_status_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        self.ripped_status_label = ttk.Label(self.ripped_status_frame, text="No ripped file found", foreground="gray")
+        self.ripped_status_label.pack()
+        
+        # Buttons frame
+        buttons_frame = ttk.Frame(self.encode_frame)
+        buttons_frame.pack(pady=20)
+        
+        # Start encoding (rip + encode)
+        ttk.Button(buttons_frame, text="Rip & Encode", 
+                  command=self.start_encoding, style="Accent.TButton").pack(side=tk.LEFT, padx=5)
+        
+        # Re-encode only button
+        self.reencode_button = ttk.Button(buttons_frame, text="Re-encode Only (Skip Rip)", 
+                                         command=self.start_reencoding, state="disabled")
+        self.reencode_button.pack(side=tk.LEFT, padx=5)
+        
+        # Check for existing ripped file on tab change
+        self.root.nametowidget(".!notebook").bind("<<NotebookTabChanged>>", lambda e: self.check_ripped_file())
     
     def setup_output_tab(self):
         """Setup output and progress tab"""
@@ -979,6 +998,26 @@ class DiscRipperGUI:
         except Exception as e:
             self.log(f"Failed to load cover art: {e}")
     
+    def check_ripped_file(self):
+        """Check if a ripped MKV file exists in temp directory"""
+        temp_dir = Path.home() / "tmp" / "disc_rip"
+        mkv_files = list(temp_dir.glob("*.mkv")) if temp_dir.exists() else []
+        
+        if mkv_files:
+            file = mkv_files[0]
+            size_mb = file.stat().st_size / (1024 * 1024)
+            self.ripped_status_label.config(
+                text=f"✓ Found: {file.name} ({size_mb:.1f} MB)",
+                foreground="green"
+            )
+            self.reencode_button.config(state="normal")
+        else:
+            self.ripped_status_label.config(
+                text="No ripped file found",
+                foreground="gray"
+            )
+            self.reencode_button.config(state="disabled")
+    
     def browse_output(self):
         """Browse for output folder"""
         folder = filedialog.askdirectory(initialdir=self.output_folder_var.get())
@@ -1000,65 +1039,101 @@ class DiscRipperGUI:
         
         def encode_thread():
             try:
-                self.rip_and_encode()
+                self.rip_and_encode(skip_rip=False)
             except Exception as e:
                 self.log(f"Error: {str(e)}")
                 self.progress_label.config(text="Failed")
         
         threading.Thread(target=encode_thread, daemon=True).start()
     
-    def rip_and_encode(self):
+    def start_reencoding(self):
+        """Start encoding without ripping (use existing temp file)"""
+        if not self.ffmpeg_path:
+            messagebox.showerror("Error", "FFmpeg not found! Install with: brew install ffmpeg")
+            return
+        
+        # Check temp file still exists
+        temp_dir = Path.home() / "tmp" / "disc_rip"
+        mkv_files = list(temp_dir.glob("*.mkv")) if temp_dir.exists() else []
+        
+        if not mkv_files:
+            messagebox.showerror("Error", "No ripped file found. Please rip the disc first.")
+            return
+        
+        # Switch to progress tab
+        self.root.nametowidget(".!notebook").select(2)
+        
+        def encode_thread():
+            try:
+                self.rip_and_encode(skip_rip=True)
+            except Exception as e:
+                self.log(f"Error: {str(e)}")
+                self.progress_label.config(text="Failed")
+        
+        threading.Thread(target=encode_thread, daemon=True).start()
+    
+    def rip_and_encode(self, skip_rip=False):
         """Rip disc with MakeMKV and encode to AV1"""
         movie_name = self.movie_name_var.get()
         output_folder = Path(self.output_folder_var.get())
         output_folder.mkdir(parents=True, exist_ok=True)
         
-        # Step 1: Rip with MakeMKV
-        self.log("Step 1: Ripping disc with MakeMKV...")
-        self.progress_label.config(text="Ripping disc...")
-        self.progress_var.set(10)
-        
         temp_dir = Path.home() / "tmp" / "disc_rip"
         temp_dir.mkdir(parents=True, exist_ok=True)
         
-        # Clean up any existing files in temp directory to avoid MakeMKV prompts
-        for old_file in temp_dir.glob("*.mkv"):
-            try:
-                old_file.unlink()
-                self.log(f"Cleaned up old temp file: {old_file.name}")
-            except Exception as e:
-                self.log(f"Warning: Could not delete {old_file.name}: {e}")
-        
-        drive = self.drive_var.get()
-        cmd = [self.makemkv_path, "mkv", f"disc:{drive}", 
-               self.selected_title, str(temp_dir)]
-        
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, 
-                                  stderr=subprocess.PIPE, text=True)
-        self.running_processes.append(process)
-        
-        for line in process.stdout:
-            self.log(line.strip())
-            if "Progress" in line:
+        if skip_rip:
+            # Skip ripping, use existing file
+            self.log("Skipping rip, using existing file...")
+            mkv_files = list(temp_dir.glob("*.mkv"))
+            if not mkv_files:
+                raise Exception("No existing MKV file found")
+            input_file = mkv_files[0]
+            self.log(f"Using existing rip: {input_file}")
+            self.progress_var.set(50)
+        else:
+            # Step 1: Rip with MakeMKV
+            self.log("Step 1: Ripping disc with MakeMKV...")
+            self.progress_label.config(text="Ripping disc...")
+            self.progress_var.set(10)
+            
+            # Clean up any existing files in temp directory to avoid MakeMKV prompts
+            for old_file in temp_dir.glob("*.mkv"):
                 try:
-                    progress = int(re.search(r'(\d+)%', line).group(1))
-                    self.progress_var.set(10 + progress * 0.4)  # 10-50%
-                except:
-                    pass
-        
-        process.wait()
-        self.running_processes.remove(process)
-        
-        if process.returncode != 0:
-            raise Exception("MakeMKV ripping failed")
-        
-        # Find the ripped MKV file
-        mkv_files = list(temp_dir.glob("*.mkv"))
-        if not mkv_files:
-            raise Exception("No MKV file found after ripping")
-        
-        input_file = mkv_files[0]
-        self.log(f"Ripped to: {input_file}")
+                    old_file.unlink()
+                    self.log(f"Cleaned up old temp file: {old_file.name}")
+                except Exception as e:
+                    self.log(f"Warning: Could not delete {old_file.name}: {e}")
+            
+            drive = self.drive_var.get()
+            cmd = [self.makemkv_path, "mkv", f"disc:{drive}", 
+                   self.selected_title, str(temp_dir)]
+            
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, 
+                                      stderr=subprocess.PIPE, text=True)
+            self.running_processes.append(process)
+            
+            for line in process.stdout:
+                self.log(line.strip())
+                if "Progress" in line:
+                    try:
+                        progress = int(re.search(r'(\d+)%', line).group(1))
+                        self.progress_var.set(10 + progress * 0.4)  # 10-50%
+                    except:
+                        pass
+            
+            process.wait()
+            self.running_processes.remove(process)
+            
+            if process.returncode != 0:
+                raise Exception("MakeMKV ripping failed")
+            
+            # Find the ripped MKV file
+            mkv_files = list(temp_dir.glob("*.mkv"))
+            if not mkv_files:
+                raise Exception("No MKV file found after ripping")
+            
+            input_file = mkv_files[0]
+            self.log(f"Ripped to: {input_file}")
         
         # Analyze input file for HDR/DV metadata
         video_info = self.analyze_video(input_file)
@@ -1210,13 +1285,16 @@ class DiscRipperGUI:
         if process.returncode != 0:
             raise Exception("FFmpeg encoding failed")
         
-        # Cleanup
-        input_file.unlink()
+        # Success - keep temp file for potential re-encoding
         self.log(f"\n✓ Complete! Output: {output_file}")
+        self.log(f"Temp file kept at: {input_file} (for re-encoding with different settings)")
         self.progress_label.config(text="Complete!")
         self.progress_var.set(100)
         
-        messagebox.showinfo("Success", f"Encoding complete!\n\nOutput: {output_file}")
+        # Update ripped file status
+        self.check_ripped_file()
+        
+        messagebox.showinfo("Success", f"Encoding complete!\n\nOutput: {output_file}\n\nTip: You can re-encode with different settings using 'Re-encode Only' button.")
 
 
 def main():
