@@ -22,6 +22,17 @@ except ImportError:
     Image = None
     ImageTk = None
 
+# Set app name for macOS menu bar
+try:
+    from Foundation import NSBundle
+    bundle = NSBundle.mainBundle()
+    if bundle:
+        info = bundle.localizedInfoDictionary() or bundle.infoDictionary()
+        if info:
+            info['CFBundleName'] = 'Disc Ripper'
+except ImportError:
+    pass
+
 
 class DiscRipperGUI:
     def __init__(self, root):

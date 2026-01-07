@@ -42,6 +42,9 @@ tmp/
 # Config files with secrets
 config.json
 
+# Generated app bundle
+DiscRipper.app/
+
 # Output files
 *.mkv
 *.mp4
