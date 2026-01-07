@@ -4,7 +4,7 @@ Disc Ripper GUI - Rip Blu-ray/DVD discs and encode to AV1
 """
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
 import subprocess
 import json
 import os
@@ -12,6 +12,7 @@ import re
 import threading
 import urllib.request
 import urllib.parse
+import keyring
 from io import BytesIO
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -28,18 +29,24 @@ class DiscRipperGUI:
         self.root.title("Disc Ripper - AV1 Encoder")
         self.root.geometry("900x700")
         
+        # Setup menu bar
+        self.setup_menu()
+        
         self.makemkv_path = self.find_makemkv()
         self.ffmpeg_path = self.find_ffmpeg()
         self.disc_info = None
         self.selected_title = None
         self.audio_tracks = []
         self.subtitle_tracks = []
-        self.tmdb_config = self.load_tmdb_config()
         self.cover_art_label = None
         self.current_movie_data = None
         
         self.setup_ui()
         self.check_dependencies()
+        
+        # Check for MakeMKV on first run
+        if not self.makemkv_path:
+            self.prompt_makemkv_install()
     
     def find_makemkv(self) -> Optional[str]:
         """Find MakeMKV command line tool"""
@@ -76,22 +83,131 @@ class DiscRipperGUI:
             pass
         return None
     
-    def load_tmdb_config(self) -> Dict:
-        """Load TMDb API configuration"""
-        config_file = Path(__file__).parent / "config.json"
+    def setup_menu(self):
+        """Set up menu bar"""
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+        
+        # Settings menu
+        settings_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Settings", menu=settings_menu)
+        settings_menu.add_command(label="TMDb API Key", command=self.show_api_key_dialog)
+        settings_menu.add_command(label="Check for MakeMKV", command=self.check_makemkv_install)
+        settings_menu.add_separator()
+        settings_menu.add_command(label="Check for MakeMKV", command=self.check_makemkv_install)
+    
+    def get_tmdb_api_key(self) -> Optional[str]:
+        """Get TMDb API key from secure keychain storage"""
         try:
-            if config_file.exists():
-                with open(config_file) as f:
-                    return json.load(f)
+            api_key = keyring.get_password("disc-ripper", "tmdb_api_key")
+            return api_key
         except Exception as e:
-            self.log(f"Warning: Could not load TMDb config: {e}")
-        return {}
+            return None
+    
+    def set_tmdb_api_key(self, api_key: str):
+        """Store TMDb API key securely in keychain"""
+        try:
+            if api_key:
+                keyring.set_password("disc-ripper", "tmdb_api_key", api_key)
+            else:
+                keyring.delete_password("disc-ripper", "tmdb_api_key")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save API key: {e}")
+    
+    def show_api_key_dialog(self):
+        """Show dialog for entering TMDb API key"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("TMDb API Key")
+        dialog.geometry("500x300")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Instructions
+        instructions = tk.Label(dialog, text="Enter your TMDb API key to enable automatic movie metadata and cover art.\n\n"
+                                          "Get a free API key at: https://www.themoviedb.org/settings/api",
+                               justify=tk.LEFT, wraplength=450)
+        instructions.pack(padx=20, pady=20)
+        
+        # Current key (masked)
+        current_key = self.get_tmdb_api_key()
+        current_label = tk.Label(dialog, text=f"Current: {'*' * 20 if current_key else 'Not set'}")
+        current_label.pack()
+        
+        # Input frame
+        input_frame = ttk.Frame(dialog)
+        input_frame.pack(padx=20, pady=10, fill=tk.X)
+        
+        ttk.Label(input_frame, text="API Key:").pack(side=tk.LEFT, padx=5)
+        api_key_var = tk.StringVar(value=current_key or "")
+        api_key_entry = ttk.Entry(input_frame, textvariable=api_key_var, width=50, show="*")
+        api_key_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        
+        # Show/Hide toggle
+        def toggle_visibility():
+            if api_key_entry.cget("show") == "*":
+                api_key_entry.config(show="")
+                show_btn.config(text="Hide")
+            else:
+                api_key_entry.config(show="*")
+                show_btn.config(text="Show")
+        
+        show_btn = ttk.Button(input_frame, text="Show", command=toggle_visibility, width=6)
+        show_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Buttons
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(pady=20)
+        
+        def save_and_close():
+            self.set_tmdb_api_key(api_key_var.get().strip())
+            messagebox.showinfo("Saved", "TMDb API key saved securely!")
+            dialog.destroy()
+        
+        def clear_and_close():
+            self.set_tmdb_api_key("")
+            messagebox.showinfo("Cleared", "TMDb API key removed")
+            dialog.destroy()
+        
+        ttk.Button(button_frame, text="Save", command=save_and_close).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Clear", command=clear_and_close).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+    
+    def prompt_makemkv_install(self):
+        """Prompt user to install MakeMKV"""
+        response = messagebox.askyesno(
+            "MakeMKV Not Found",
+            "MakeMKV is required to rip discs.\n\n"
+            "Would you like to download and install it now?\n\n"
+            "(This will open the MakeMKV download page)"
+        )
+        if response:
+            import webbrowser
+            webbrowser.open("https://www.makemkv.com/download/")
+            messagebox.showinfo(
+                "Installation",
+                "After installing MakeMKV, restart this application.\n\n"
+                "Or use Settings → Check for MakeMKV to verify installation."
+            )
+    
+    def check_makemkv_install(self):
+        """Check if MakeMKV is installed and update path"""
+        self.makemkv_path = self.find_makemkv()
+        if self.makemkv_path:
+            messagebox.showinfo("Found", f"MakeMKV found:\n{self.makemkv_path}")
+        else:
+            response = messagebox.askyesno(
+                "Not Found",
+                "MakeMKV is not installed.\n\nWould you like to download it?"
+            )
+            if response:
+                import webbrowser
+                webbrowser.open("https://www.makemkv.com/download/")
     
     def check_dependencies(self):
         """Check if required tools are installed"""
         messages = []
         if not self.makemkv_path:
-            messages.append("❌ MakeMKV not found")
+            messages.append("❌ MakeMKV not found - Use Settings menu to install")
         else:
             messages.append(f"✓ MakeMKV found: {self.makemkv_path}")
         
@@ -100,10 +216,10 @@ class DiscRipperGUI:
         else:
             messages.append(f"✓ FFmpeg found: {self.ffmpeg_path}")
         
-        if self.tmdb_config.get("tmdb_api_key"):
+        if self.get_tmdb_api_key():
             messages.append("✓ TMDb API configured")
         else:
-            messages.append("⚠️  TMDb API not configured (movie lookup disabled)")
+            messages.append("⚠️  TMDb API not configured - Use Settings menu to add")
         
         self.log("\n".join(messages))
     
@@ -721,12 +837,14 @@ class DiscRipperGUI:
     
     def auto_search_movie(self, query: str, show_dialog: bool = False):
         """Automatically search TMDb for movie"""
-        if not self.tmdb_config.get("tmdb_api_key"):
+        api_key = self.get_tmdb_api_key()
+        if not api_key:
             if show_dialog:
-                messagebox.showwarning("TMDb Not Configured", "TMDb API key not found in config.json")
+                messagebox.showwarning(
+                    "TMDb Not Configured",
+                    "TMDb API key not set.\n\nGo to Settings → TMDb API Key to configure."
+                )
             return
-        
-        api_key = self.tmdb_config["tmdb_api_key"]
         
         try:
             # Search for movie

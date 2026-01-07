@@ -39,6 +39,9 @@ env/
 *.tmp
 tmp/
 
+# Config files with secrets
+config.json
+
 # Output files
 *.mkv
 *.mp4

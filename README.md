@@ -20,21 +20,26 @@ A GUI application for ripping Blu-ray/DVD discs using MakeMKV and encoding them 
 ## Requirements
 
 ### macOS
-- Python 3.9 or later (built-in on macOS)
-- MakeMKV (for disc ripping)
-- FFmpeg with AV1 support (for encoding)
-- Homebrew (recommended for installing FFmpeg)
+- Python 3.11 or later
+- MakeMKV (auto-installer provided)
+- FFmpeg with AV1 support (install via Homebrew)
+- Homebrew (recommended for installing FFmpeg and Python)
+- TMDb API key (optional, for metadata and cover art)
 
 ## Installation
 
 ### 1. Install MakeMKV
 
-Download and install MakeMKV from: https://www.makemkv.com/download/
+The application will prompt you to download and install MakeMKV automatically on first run if it's not detected.
+
+Alternatively, you can manually download and install MakeMKV from: https://www.makemkv.com/download/
 
 After installation, the command-line tool should be available at:
 ```
 /Applications/MakeMKV.app/Contents/MacOS/makemkvcon
 ```
+
+You can verify installation from the Settings menu in the application.
 
 ### 2. Install FFmpeg with AV1 Support
 
@@ -45,7 +50,21 @@ brew install ffmpeg
 
 This will install FFmpeg with SVT-AV1 encoder support.
 
-### 3. Verify Installation
+### 3. Set Up TMDb API (Optional)
+
+For automatic movie metadata and cover art:
+
+1. Go to https://www.themoviedb.org/ and create a free account
+2. Visit https://www.themoviedb.org/settings/api to get your API key
+3. In the application, go to Settings → TMDb API Key
+4. Enter your API key (it's stored securely in your macOS keychain)
+
+The API key is **optional** but enables:
+- Automatic movie name lookup
+- High-quality cover art download
+- Proper metadata tagging
+
+### 4. Verify Installation
 
 Check that both tools are available:
 ```bash
@@ -56,33 +75,28 @@ Check that both tools are available:
 ffmpeg -version | grep svt-av1
 ```
 
+Or use Settings → Check for MakeMKV in the application.
+
 ## Usage
 
 ### Running the Application
 
-1. Navigate to the project directory:
+**Quick launch from anywhere:**
+```bash
+disc-ripper
+```
+
+This opens the application detached from the terminal.
+
+**Or run directly from project directory:**
 ```bash
 cd ~/codeRepo/disc-ripper
-```
-
-2. Run the application:
-```bash
-/opt/homebrew/bin/python3.11 disc_ripper.py
-```
-
-Or run directly:
-```bash
-./disc_ripper.py
-```
-
-**To run detached from terminal** (so you can close the terminal):
-```bash
 ./launch.sh
 ```
 
-Or manually:
+**Or run attached to terminal (for debugging):**
 ```bash
-nohup /opt/homebrew/bin/python3.11 disc_ripper.py > /dev/null 2>&1 &
+/opt/homebrew/bin/python3.11 ~/codeRepo/disc-ripper/disc_ripper.py
 ```
 
 ### Workflow
@@ -96,11 +110,13 @@ nohup /opt/homebrew/bin/python3.11 disc_ripper.py > /dev/null 2>&1 &
    - Click "Select Title & Continue"
 
 3. **Configure Encoding** (Tab 2):
-   - Enter the movie name
+   - Click "Auto-Search TMDb" to find movie metadata (requires TMDb API key)
+   - Or manually enter the movie name
    - Choose output folder (default: ~/Movies/Ripped)
+   - Select video encoding mode (Auto/Copy/AV1)
    - Select desired resolution
-   - Select audio tracks to include (multi-select)
-   - Select subtitle languages to include (multi-select)
+   - Select audio tracks to include (multi-select with Cmd/Ctrl)
+   - Select subtitle languages to include (multi-select with Cmd/Ctrl)
    - Enable/disable chapter markers
    - Click "Start Encoding"
 
@@ -205,15 +221,18 @@ cmd.extend(["-c:a", "aac", "-b:a", "192k"])
 
 MIT License - feel free to modify and distribute
 
+## Security
+
+The application stores your TMDb API key securely using macOS Keychain. The key is never stored in plain text on disk.
+
 ## Contributing
 
 Contributions welcome! Areas for improvement:
-- Automatic movie name detection using TMDb/OMDb API
-- Better audio track selection UI
-- Subtitle track selection
 - Batch processing multiple discs
 - Quality presets (Fast/Balanced/Quality)
-- Hardware acceleration support
+- Hardware acceleration support (VideoToolbox on macOS)
+- TV show detection and metadata
+- Multiple audio/subtitle language profiles
 
 ## Credits
 
