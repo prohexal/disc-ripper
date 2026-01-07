@@ -1082,8 +1082,9 @@ class DiscRipperGUI:
         # Subtitles - only include selected tracks
         selected_subs = self.subtitle_listbox.curselection()
         if selected_subs:
+            # Map each selected subtitle stream individually and ignore if it doesn't exist
             for idx in selected_subs:
-                cmd.extend(["-map", f"0:s:{idx}"])
+                cmd.extend(["-map", f"0:s:{idx}?"])  # The ? makes it optional
             cmd.extend(["-c:s", "copy"])
         # If no subtitles selected, don't include any
         
