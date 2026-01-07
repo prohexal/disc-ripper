@@ -1,0 +1,222 @@
+# Disc Ripper - AV1 Encoder
+
+A GUI application for ripping Blu-ray/DVD discs using MakeMKV and encoding them to AV1 format with customizable options.
+
+## Features
+
+- 🎬 **Disc Detection**: Automatically scan and detect inserted discs
+- 📊 **Title Selection**: View all available titles with duration, size, and chapter information
+- 🎨 **Resolution Control**: Choose from Original, 4K, 1080p, 720p, or 480p
+- 🔊 **Audio Track Selection**: Select which audio tracks to include
+- 🎧 **High-Quality Audio**: Automatically preserves DTS, DTS-HD, Dolby TrueHD, Dolby Digital (AC3/EAC3)
+- 🌈 **HDR Preservation**: Detects and preserves HDR10 metadata during encoding
+- 💎 **Dolby Vision Support**: Automatically copies video stream when Dolby Vision is detected
+- 🗣️ **Subtitle Selection**: Choose specific subtitle languages to include
+- 📑 **Chapter Support**: Option to include or exclude chapter markers
+- 🚀 **AV1 Encoding**: High-efficiency AV1 video codec with SVT-AV1 encoder
+- 📝 **Real-time Progress**: Live progress tracking and detailed logging
+- 🖥️ **Detached Mode**: Runs independently from terminal
+
+## Requirements
+
+### macOS
+- Python 3.9 or later (built-in on macOS)
+- MakeMKV (for disc ripping)
+- FFmpeg with AV1 support (for encoding)
+- Homebrew (recommended for installing FFmpeg)
+
+## Installation
+
+### 1. Install MakeMKV
+
+Download and install MakeMKV from: https://www.makemkv.com/download/
+
+After installation, the command-line tool should be available at:
+```
+/Applications/MakeMKV.app/Contents/MacOS/makemkvcon
+```
+
+### 2. Install FFmpeg with AV1 Support
+
+Using Homebrew (recommended):
+```bash
+brew install ffmpeg
+```
+
+This will install FFmpeg with SVT-AV1 encoder support.
+
+### 3. Verify Installation
+
+Check that both tools are available:
+```bash
+# Check MakeMKV
+/Applications/MakeMKV.app/Contents/MacOS/makemkvcon --version
+
+# Check FFmpeg
+ffmpeg -version | grep svt-av1
+```
+
+## Usage
+
+### Running the Application
+
+1. Navigate to the project directory:
+```bash
+cd ~/codeRepo/disc-ripper
+```
+
+2. Run the application:
+```bash
+/opt/homebrew/bin/python3.11 disc_ripper.py
+```
+
+Or run directly:
+```bash
+./disc_ripper.py
+```
+
+**To run detached from terminal** (so you can close the terminal):
+```bash
+./launch.sh
+```
+
+Or manually:
+```bash
+nohup /opt/homebrew/bin/python3.11 disc_ripper.py > /dev/null 2>&1 &
+```
+
+### Workflow
+
+1. **Insert Disc**: Insert a Blu-ray or DVD disc into your drive
+
+2. **Scan Disc** (Tab 1):
+   - Click "Scan for Disc" to detect the inserted disc
+   - The application will list all available titles
+   - Select the main feature title (usually the longest one)
+   - Click "Select Title & Continue"
+
+3. **Configure Encoding** (Tab 2):
+   - Enter the movie name
+   - Choose output folder (default: ~/Movies/Ripped)
+   - Select desired resolution
+   - Select audio tracks to include (multi-select)
+   - Select subtitle languages to include (multi-select)
+   - Enable/disable chapter markers
+   - Click "Start Encoding"
+
+4. **Monitor Progress** (Tab 3):
+   - Watch real-time progress of ripping and encoding
+   - View detailed logs of the process
+   - Get notification when complete
+
+### Output
+
+The final file will be saved as:
+```
+~/Movies/Ripped/<movie-name>.mkv
+```
+
+With:
+- **Video**: AV1 (SVT-AV1) or copy if Dolby Vision detected
+- **Audio**: Original codec preserved if DTS/TrueHD/AC3/EAC3, otherwise Opus (128 kbps)
+- **Subtitles**: Selected languages copied as-is
+- **HDR/DV**: Metadata automatically preserved
+- **Container**: MKV format
+- **Chapters**: Optional chapter markers
+
+## Configuration
+
+### Encoding Behavior
+
+The application intelligently handles encoding based on source content:
+
+**Video:**
+- **Dolby Vision**: Automatically copies video stream (no re-encoding) to preserve DV metadata
+- **HDR10/HDR10+**: Encodes to AV1 while preserving color primaries, transfer characteristics, and mastering display metadata
+- **SDR**: Standard AV1 encoding with preset 6, CRF 30
+
+**Audio:**
+- **High-Quality Formats**: DTS, DTS-HD, Dolby TrueHD, Dolby Digital (AC3/EAC3) are copied without re-encoding
+- **Standard Audio**: Other formats converted to Opus @ 128 kbps
+
+**Subtitles:**
+- All selected subtitle tracks are copied without modification
+
+### MakeMKV Drive Selection
+
+If you have multiple drives, change the drive number in Tab 1 (default is 0).
+
+## Troubleshooting
+
+### "MakeMKV not found"
+- Ensure MakeMKV is installed in `/Applications/`
+- Check that the command line tool exists at the expected path
+
+### "FFmpeg not found"
+- Install FFmpeg using: `brew install ffmpeg`
+- Verify installation: `which ffmpeg`
+
+### "No disc inserted" error
+- Ensure disc is fully inserted and recognized by macOS
+- Try incrementing the drive number (1, 2, etc.)
+- Check Disk Utility to see if the disc is mounted
+
+### Slow encoding
+- AV1 encoding is computationally intensive
+- Lower resolution or increase CRF value for faster encoding
+- Use a faster preset (5, 4) at the cost of file size
+
+### Audio/Video sync issues
+- Ensure you're using the latest version of FFmpeg
+- Try re-ripping with MakeMKV
+
+## Advanced Usage
+
+### Command Line Options
+
+You can modify the encoding parameters by editing `disc_ripper.py`:
+
+```python
+# Line 384 - Video encoding settings
+cmd.extend(["-c:v", "libsvtav1", "-preset", "6", "-crf", "30"])
+```
+
+**Preset values** (0-13):
+- 0-3: Highest quality, slowest
+- 4-6: Balanced (default: 6)
+- 7-9: Faster, larger files
+- 10-13: Fastest, largest files
+
+**CRF values** (0-63):
+- 0: Lossless (huge files)
+- 20-28: Very high quality
+- 30-35: Good quality (default: 30)
+- 36-51: Lower quality, smaller files
+
+### Audio Codec Options
+
+To use AAC instead of Opus:
+```python
+# Replace line 392
+cmd.extend(["-c:a", "aac", "-b:a", "192k"])
+```
+
+## License
+
+MIT License - feel free to modify and distribute
+
+## Contributing
+
+Contributions welcome! Areas for improvement:
+- Automatic movie name detection using TMDb/OMDb API
+- Better audio track selection UI
+- Subtitle track selection
+- Batch processing multiple discs
+- Quality presets (Fast/Balanced/Quality)
+- Hardware acceleration support
+
+## Credits
+
+- [MakeMKV](https://www.makemkv.com/) - Disc ripping
+- [FFmpeg](https://ffmpeg.org/) - Video encoding
+- [SVT-AV1](https://gitlab.com/AOMediaCodec/SVT-AV1) - AV1 encoder
