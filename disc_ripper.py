@@ -473,12 +473,36 @@ class DiscRipperGUI:
         self.progress_label = ttk.Label(progress_frame, text="Ready")
         self.progress_label.pack()
         
-        # Log output
-        log_frame = ttk.LabelFrame(self.output_frame, text="Log", padding=10)
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # Log output with collapse/expand
+        log_header_frame = ttk.Frame(self.output_frame)
+        log_header_frame.pack(fill=tk.X, padx=10, pady=(10, 0))
         
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=20, wrap=tk.WORD)
+        ttk.Label(log_header_frame, text="Log", font=('', 10, 'bold')).pack(side=tk.LEFT, padx=5)
+        
+        self.log_expanded = tk.BooleanVar(value=True)
+        self.log_toggle_button = ttk.Button(log_header_frame, text="Hide", 
+                                           command=self.toggle_log, width=10)
+        self.log_toggle_button.pack(side=tk.RIGHT, padx=5)
+        
+        # Log frame that can be hidden
+        self.log_frame = ttk.Frame(self.output_frame)
+        self.log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        
+        self.log_text = scrolledtext.ScrolledText(self.log_frame, height=20, wrap=tk.WORD)
         self.log_text.pack(fill=tk.BOTH, expand=True)
+    
+    def toggle_log(self):
+        """Toggle log visibility"""
+        if self.log_expanded.get():
+            # Hide log
+            self.log_frame.pack_forget()
+            self.log_toggle_button.config(text="Show")
+            self.log_expanded.set(False)
+        else:
+            # Show log
+            self.log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+            self.log_toggle_button.config(text="Hide")
+            self.log_expanded.set(True)
     
     def log(self, message: str):
         """Add message to log"""
