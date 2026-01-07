@@ -40,6 +40,9 @@ class DiscRipperGUI:
         self.root.title("Disc Ripper - AV1 Encoder")
         self.root.geometry("900x700")
         
+        # Track running processes for cleanup
+        self.running_processes = []
+        
         # Setup menu bar
         self.setup_menu()
         
@@ -55,9 +58,29 @@ class DiscRipperGUI:
         self.setup_ui()
         self.check_dependencies()
         
+        # Register cleanup on window close
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
         # Check for MakeMKV on first run
         if not self.makemkv_path:
             self.prompt_makemkv_install()
+    
+    def on_closing(self):
+        """Clean up processes and close the application"""
+        # Kill any running processes
+        for process in self.running_processes:
+            try:
+                if process.poll() is None:  # Process is still running
+                    process.terminate()
+                    process.wait(timeout=2)
+            except:
+                try:
+                    process.kill()  # Force kill if terminate fails
+                except:
+                    pass
+        
+        # Destroy the window
+        self.root.destroy()
     
     def find_makemkv(self) -> Optional[str]:
         """Find MakeMKV command line tool"""
@@ -963,12 +986,21 @@ class DiscRipperGUI:
         temp_dir = Path.home() / "tmp" / "disc_rip"
         temp_dir.mkdir(parents=True, exist_ok=True)
         
+        # Clean up any existing files in temp directory to avoid MakeMKV prompts
+        for old_file in temp_dir.glob("*.mkv"):
+            try:
+                old_file.unlink()
+                self.log(f"Cleaned up old temp file: {old_file.name}")
+            except Exception as e:
+                self.log(f"Warning: Could not delete {old_file.name}: {e}")
+        
         drive = self.drive_var.get()
         cmd = [self.makemkv_path, "mkv", f"disc:{drive}", 
                self.selected_title, str(temp_dir)]
         
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, 
                                   stderr=subprocess.PIPE, text=True)
+        self.running_processes.append(process)
         
         for line in process.stdout:
             self.log(line.strip())
@@ -980,6 +1012,7 @@ class DiscRipperGUI:
                     pass
         
         process.wait()
+        self.running_processes.remove(process)
         
         if process.returncode != 0:
             raise Exception("MakeMKV ripping failed")
@@ -1095,6 +1128,7 @@ class DiscRipperGUI:
         
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, 
                                   stderr=subprocess.PIPE, text=True)
+        self.running_processes.append(process)
         
         duration = None
         for line in process.stderr:
@@ -1117,6 +1151,7 @@ class DiscRipperGUI:
                     self.progress_var.set(50 + progress * 0.5)  # 50-100%
         
         process.wait()
+        self.running_processes.remove(process)
         
         if process.returncode != 0:
             raise Exception("FFmpeg encoding failed")
