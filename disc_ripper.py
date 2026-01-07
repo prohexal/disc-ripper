@@ -368,6 +368,41 @@ class DiscRipperGUI:
         ttk.Radiobutton(video_frame, text="Encode to AV1", 
                        variable=self.video_mode_var, value="encode").pack(side=tk.LEFT, padx=10)
         
+        # Quality preset
+        quality_frame = ttk.LabelFrame(self.encode_frame, text="Quality Preset", padding=10)
+        quality_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        ttk.Label(quality_frame, text="Preset:").pack(side=tk.LEFT, padx=5)
+        self.quality_preset_var = tk.StringVar(value="balanced")
+        quality_presets = [
+            ("Maximum (AV1, Slow, Smallest)", "maximum"),
+            ("High (AV1, Medium, Small)", "high"),
+            ("Balanced (AV1, Medium, Good)", "balanced"),
+            ("Fast (AV1, Fast, Larger)", "fast"),
+            ("Hardware (H.265, Very Fast)", "hardware")
+        ]
+        preset_menu = ttk.Combobox(quality_frame, textvariable=self.quality_preset_var, 
+                                  values=[p[1] for p in quality_presets], state="readonly", width=30)
+        preset_menu.pack(side=tk.LEFT, padx=5)
+        
+        # Bind to show description
+        def show_preset_info(event=None):
+            preset = self.quality_preset_var.get()
+            descriptions = {
+                "maximum": "AV1 Preset 4, CRF 20 - Best quality, ~4hr for 2hr movie",
+                "high": "AV1 Preset 6, CRF 25 - Excellent quality, ~2.5hr for 2hr movie",
+                "balanced": "AV1 Preset 8, CRF 30 - Very good quality, ~1.5hr for 2hr movie",
+                "fast": "AV1 Preset 10, CRF 35 - Good quality, ~50min for 2hr movie",
+                "hardware": "H.265 VideoToolbox - Excellent quality, ~15min for 2hr movie"
+            }
+            preset_info_label.config(text=descriptions.get(preset, ""))
+        
+        preset_menu.bind("<<ComboboxSelected>>", show_preset_info)
+        
+        preset_info_label = ttk.Label(quality_frame, text="", foreground="gray")
+        preset_info_label.pack(side=tk.LEFT, padx=10)
+        show_preset_info()  # Show initial description
+        
         # Resolution
         res_frame = ttk.LabelFrame(self.encode_frame, text="Resolution", padding=10)
         res_frame.pack(fill=tk.X, padx=10, pady=10)
@@ -1068,21 +1103,40 @@ class DiscRipperGUI:
         if use_copy:
             cmd.extend(["-c:v", "copy"])
             self.log("Using copy mode - original video preserved")
-        elif has_hdr:
-            self.log("Detected HDR - encoding with metadata preservation")
-            cmd.extend(["-c:v", "libsvtav1", "-preset", "6", "-crf", "30"])
-            # Preserve HDR metadata
-            cmd.extend([
-                "-color_primaries", str(video_info.get("color_primaries", "bt2020")),
-                "-color_trc", str(video_info.get("color_trc", "smpte2084")),
-                "-colorspace", str(video_info.get("colorspace", "bt2020nc"))
-            ])
-            # Copy HDR side data
-            if video_info.get("master_display"):
-                cmd.extend(["-x265-params", f"master-display={video_info['master_display']}"])
         else:
-            self.log("Standard video - encoding to AV1")
-            cmd.extend(["-c:v", "libsvtav1", "-preset", "6", "-crf", "30"])
+            # Get quality preset
+            preset = self.quality_preset_var.get()
+            preset_config = {
+                "maximum": {"encoder": "libsvtav1", "preset": "4", "crf": "20"},
+                "high": {"encoder": "libsvtav1", "preset": "6", "crf": "25"},
+                "balanced": {"encoder": "libsvtav1", "preset": "8", "crf": "30"},
+                "fast": {"encoder": "libsvtav1", "preset": "10", "crf": "35"},
+                "hardware": {"encoder": "hevc_videotoolbox", "preset": None, "crf": None}
+            }
+            
+            config = preset_config.get(preset, preset_config["balanced"])
+            
+            if config["encoder"] == "hevc_videotoolbox":
+                # Hardware acceleration with VideoToolbox
+                self.log(f"Using Hardware Acceleration (VideoToolbox H.265)")
+                cmd.extend(["-c:v", "hevc_videotoolbox", "-q:v", "65"])
+                # VideoToolbox quality: 0-100, 65 is good balance
+            else:
+                # Software AV1 encoding
+                if has_hdr:
+                    self.log(f"Encoding with {preset} preset (AV1) - HDR metadata preserved")
+                else:
+                    self.log(f"Encoding with {preset} preset (AV1)")
+                
+                cmd.extend(["-c:v", config["encoder"], "-preset", config["preset"], "-crf", config["crf"]])
+                
+                # Preserve HDR metadata for AV1
+                if has_hdr:
+                    cmd.extend([
+                        "-color_primaries", str(video_info.get("color_primaries", "bt2020")),
+                        "-color_trc", str(video_info.get("color_trc", "smpte2084")),
+                        "-colorspace", str(video_info.get("colorspace", "bt2020nc"))
+                    ])
         
         # Resolution (skip if using copy)
         resolution = self.resolution_var.get()
