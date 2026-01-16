@@ -12,10 +12,12 @@ import re
 import threading
 import urllib.request
 import urllib.parse
+import shutil
+import time
 import keyring
 from io import BytesIO
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 try:
     from PIL import Image, ImageTk
 except ImportError:
@@ -48,6 +50,10 @@ class DiscRipperGUI:
         
         self.makemkv_path = self.find_makemkv()
         self.ffmpeg_path = self.find_ffmpeg()
+        self.ffprobe_path = self.find_ffprobe()
+
+        # Load persisted settings early so UI defaults can reflect them
+        self.settings = self.load_settings()
         self.disc_info = None
         self.selected_title = None
         self.audio_tracks = []
@@ -108,13 +114,46 @@ class DiscRipperGUI:
     
     def find_ffmpeg(self) -> Optional[str]:
         """Find FFmpeg binary"""
+        # Try 'which' first (works when running from terminal)
         try:
-            result = subprocess.run(["which", "ffmpeg"], 
+            result = subprocess.run(["which", "ffmpeg"],
                                   capture_output=True, text=True)
             if result.returncode == 0:
                 return result.stdout.strip()
         except:
             pass
+        # Fallback: check common Homebrew/macOS paths (important for .app bundles)
+        possible_paths = [
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/usr/bin/ffmpeg",
+            "ffmpeg"
+        ]
+        for path in possible_paths:
+            if Path(path).exists():
+                return path
+        return None
+
+    def find_ffprobe(self) -> Optional[str]:
+        """Find FFprobe binary (usually shipped with FFmpeg)"""
+        # Try 'which' first (works when running from terminal)
+        try:
+            result = subprocess.run(["which", "ffprobe"],
+                                  capture_output=True, text=True)
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except:
+            pass
+        # Fallback: check common Homebrew/macOS paths (important for .app bundles)
+        possible_paths = [
+            "/opt/homebrew/bin/ffprobe",
+            "/usr/local/bin/ffprobe",
+            "/usr/bin/ffprobe",
+            "ffprobe"
+        ]
+        for path in possible_paths:
+            if Path(path).exists():
+                return path
         return None
     
     def setup_menu(self):
@@ -126,9 +165,182 @@ class DiscRipperGUI:
         settings_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Settings", menu=settings_menu)
         settings_menu.add_command(label="TMDb API Key", command=self.show_api_key_dialog)
-        settings_menu.add_command(label="Check for MakeMKV", command=self.check_makemkv_install)
+        settings_menu.add_command(label="Plex Settings", command=self.show_plex_settings_dialog)
         settings_menu.add_separator()
         settings_menu.add_command(label="Check for MakeMKV", command=self.check_makemkv_install)
+
+    def get_app_support_dir(self) -> Path:
+        """Return app support directory for storing non-secret settings."""
+        return Path.home() / "Library" / "Application Support" / "DiscRipper"
+
+    def get_settings_path(self) -> Path:
+        return self.get_app_support_dir() / "settings.json"
+
+    def get_default_settings(self) -> Dict:
+        return {
+            "plex_movies_1080p_path": "",
+            "plex_movies_4k_path": "",
+            "plex_folder_per_movie": True,
+            "plex_auto_copy_after_encode": False,
+            "plex_delete_local_after_copy": True,
+            "plex_collision_policy": "skip",  # skip | overwrite
+            # Optional SMB auto-mount info. Password is stored in Keychain.
+            "plex_smb_url": "",  # e.g. smb://SERVER/Share
+            "plex_smb_username": "",
+            "plex_smb_use_keychain_password": False,
+            "plex_smb_auto_mount_on_copy": False
+        }
+
+    def load_settings(self) -> Dict:
+        """Load settings from disk; secrets are kept in Keychain."""
+        settings = self.get_default_settings()
+        path = self.get_settings_path()
+        try:
+            if path.exists():
+                data = json.loads(path.read_text())
+                if isinstance(data, dict):
+                    settings.update(data)
+        except Exception as e:
+            # Never crash on settings load
+            try:
+                self.log(f"Warning: failed to load settings: {e}")
+            except Exception:
+                pass
+        return settings
+
+    def save_settings(self):
+        """Persist current settings to disk (non-secret values only)."""
+        path = self.get_settings_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Only store JSON-serializable settings
+            path.write_text(json.dumps(self.settings, indent=2, sort_keys=True))
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save settings: {e}")
+
+    def get_plex_smb_password(self) -> Optional[str]:
+        try:
+            return keyring.get_password("disc-ripper", "plex_smb_password")
+        except Exception:
+            return None
+
+    def set_plex_smb_password(self, password: str):
+        try:
+            if password:
+                keyring.set_password("disc-ripper", "plex_smb_password", password)
+            else:
+                keyring.delete_password("disc-ripper", "plex_smb_password")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save SMB password: {e}")
+
+    def show_plex_settings_dialog(self):
+        """Configure Plex copy destinations and optional SMB mount settings."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Plex Settings")
+        dialog.geometry("700x520")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        container = ttk.Frame(dialog)
+        container.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+
+        def browse_folder(var: tk.StringVar):
+            folder = filedialog.askdirectory()
+            if folder:
+                var.set(folder)
+
+        # Destinations
+        dest_frame = ttk.LabelFrame(container, text="Destination folders (mounted paths)", padding=10)
+        dest_frame.pack(fill=tk.X)
+
+        movies_1080_var = tk.StringVar(value=self.settings.get("plex_movies_1080p_path", ""))
+        movies_4k_var = tk.StringVar(value=self.settings.get("plex_movies_4k_path", ""))
+
+        ttk.Label(dest_frame, text="Movies (1080p and below):").grid(row=0, column=0, sticky="w")
+        ttk.Entry(dest_frame, textvariable=movies_1080_var, width=60).grid(row=0, column=1, padx=5, pady=4, sticky="ew")
+        ttk.Button(dest_frame, text="Browse", command=lambda: browse_folder(movies_1080_var)).grid(row=0, column=2)
+
+        ttk.Label(dest_frame, text="4K Movies (2160p):").grid(row=1, column=0, sticky="w")
+        ttk.Entry(dest_frame, textvariable=movies_4k_var, width=60).grid(row=1, column=1, padx=5, pady=4, sticky="ew")
+        ttk.Button(dest_frame, text="Browse", command=lambda: browse_folder(movies_4k_var)).grid(row=1, column=2)
+
+        dest_frame.columnconfigure(1, weight=1)
+
+        # Behavior
+        behavior_frame = ttk.LabelFrame(container, text="Behavior", padding=10)
+        behavior_frame.pack(fill=tk.X, pady=(12, 0))
+
+        folder_per_movie_var = tk.BooleanVar(value=bool(self.settings.get("plex_folder_per_movie", True)))
+        auto_copy_var = tk.BooleanVar(value=bool(self.settings.get("plex_auto_copy_after_encode", False)))
+        delete_local_var = tk.BooleanVar(value=bool(self.settings.get("plex_delete_local_after_copy", True)))
+
+        ttk.Checkbutton(behavior_frame, text="Create folder per movie", variable=folder_per_movie_var).pack(anchor="w")
+        ttk.Checkbutton(behavior_frame, text="Auto-copy to Plex after encode", variable=auto_copy_var).pack(anchor="w")
+        ttk.Checkbutton(behavior_frame, text="Delete local output after successful copy", variable=delete_local_var).pack(anchor="w")
+
+        collision_frame = ttk.Frame(behavior_frame)
+        collision_frame.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(collision_frame, text="If destination file exists:").pack(side=tk.LEFT)
+        collision_var = tk.StringVar(value=self.settings.get("plex_collision_policy", "skip"))
+        collision_menu = ttk.Combobox(collision_frame, textvariable=collision_var, state="readonly", width=12,
+                                      values=["skip", "overwrite"])
+        collision_menu.pack(side=tk.LEFT, padx=8)
+
+        # Optional SMB mount
+        smb_frame = ttk.LabelFrame(container, text="Optional: SMB auto-mount (only attempted during copy)", padding=10)
+        smb_frame.pack(fill=tk.X, pady=(12, 0))
+
+        smb_url_var = tk.StringVar(value=self.settings.get("plex_smb_url", ""))
+        smb_user_var = tk.StringVar(value=self.settings.get("plex_smb_username", ""))
+        smb_use_keychain_var = tk.BooleanVar(value=bool(self.settings.get("plex_smb_use_keychain_password", False)))
+        smb_auto_mount_var = tk.BooleanVar(value=bool(self.settings.get("plex_smb_auto_mount_on_copy", False)))
+
+        ttk.Label(smb_frame, text="SMB URL (e.g. smb://unraid/Media):").grid(row=0, column=0, sticky="w")
+        ttk.Entry(smb_frame, textvariable=smb_url_var, width=60).grid(row=0, column=1, padx=5, pady=4, sticky="ew")
+
+        ttk.Label(smb_frame, text="Username:").grid(row=1, column=0, sticky="w")
+        ttk.Entry(smb_frame, textvariable=smb_user_var, width=30).grid(row=1, column=1, padx=5, pady=4, sticky="w")
+
+        ttk.Checkbutton(smb_frame, text="Use Keychain-stored password", variable=smb_use_keychain_var).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(smb_frame, text="Auto-mount SMB share when copying", variable=smb_auto_mount_var).grid(row=3, column=0, columnspan=2, sticky="w")
+
+        # Password entry (only used to set keychain)
+        pw_frame = ttk.Frame(smb_frame)
+        pw_frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Label(pw_frame, text="Password (stored in Keychain on Save):").pack(side=tk.LEFT)
+        smb_pw_var = tk.StringVar(value="")
+        ttk.Entry(pw_frame, textvariable=smb_pw_var, show="*", width=30).pack(side=tk.LEFT, padx=8)
+
+        smb_frame.columnconfigure(1, weight=1)
+
+        # Buttons
+        button_frame = ttk.Frame(container)
+        button_frame.pack(fill=tk.X, pady=(18, 0))
+
+        def save_and_close():
+            self.settings["plex_movies_1080p_path"] = movies_1080_var.get().strip()
+            self.settings["plex_movies_4k_path"] = movies_4k_var.get().strip()
+            self.settings["plex_folder_per_movie"] = bool(folder_per_movie_var.get())
+            self.settings["plex_auto_copy_after_encode"] = bool(auto_copy_var.get())
+            self.settings["plex_delete_local_after_copy"] = bool(delete_local_var.get())
+            self.settings["plex_collision_policy"] = collision_var.get()
+
+            self.settings["plex_smb_url"] = smb_url_var.get().strip()
+            self.settings["plex_smb_username"] = smb_user_var.get().strip()
+            self.settings["plex_smb_use_keychain_password"] = bool(smb_use_keychain_var.get())
+            self.settings["plex_smb_auto_mount_on_copy"] = bool(smb_auto_mount_var.get())
+
+            # Only set keychain password if user provided one.
+            pw = smb_pw_var.get()
+            if pw:
+                self.set_plex_smb_password(pw)
+                self.settings["plex_smb_use_keychain_password"] = True
+
+            self.save_settings()
+            dialog.destroy()
+
+        ttk.Button(button_frame, text="Save", command=save_and_close).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT, padx=5)
     
     def get_tmdb_api_key(self) -> Optional[str]:
         """Get TMDb API key from secure keychain storage"""
@@ -249,6 +461,11 @@ class DiscRipperGUI:
             messages.append("❌ FFmpeg not found - Install with: brew install ffmpeg")
         else:
             messages.append(f"✓ FFmpeg found: {self.ffmpeg_path}")
+
+        if not getattr(self, 'ffprobe_path', None):
+            messages.append("⚠️  FFprobe not found - resolution detection for Plex routing may be limited")
+        else:
+            messages.append(f"✓ FFprobe found: {self.ffprobe_path}")
         
         if self.get_tmdb_api_key():
             messages.append("✓ TMDb API configured")
@@ -260,23 +477,28 @@ class DiscRipperGUI:
     def setup_ui(self):
         """Setup the user interface"""
         # Main notebook for tabs
-        notebook = ttk.Notebook(self.root)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # Tab 1: Disc Detection & Title Selection
-        self.disc_frame = ttk.Frame(notebook)
-        notebook.add(self.disc_frame, text="1. Detect Disc")
+        self.disc_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.disc_frame, text="1. Detect Disc")
         self.setup_disc_tab()
         
         # Tab 2: Encoding Options
-        self.encode_frame = ttk.Frame(notebook)
-        notebook.add(self.encode_frame, text="2. Encoding Options")
+        self.encode_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.encode_frame, text="2. Encoding Options")
         self.setup_encode_tab()
         
         # Tab 3: Output & Progress
-        self.output_frame = ttk.Frame(notebook)
-        notebook.add(self.output_frame, text="3. Progress")
+        self.output_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.output_frame, text="3. Progress")
         self.setup_output_tab()
+
+        # Tab 4: Plex Sync
+        self.plex_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.plex_frame, text="4. Plex Sync")
+        self.setup_plex_sync_tab()
         
     def setup_disc_tab(self):
         """Setup disc detection and title selection tab"""
@@ -418,14 +640,14 @@ class DiscRipperGUI:
         audio_frame = ttk.LabelFrame(self.encode_frame, text="Audio Tracks", padding=10)
         audio_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        self.audio_listbox = tk.Listbox(audio_frame, selectmode=tk.MULTIPLE, height=4)
+        self.audio_listbox = tk.Listbox(audio_frame, selectmode=tk.MULTIPLE, height=4, exportselection=False)
         self.audio_listbox.pack(fill=tk.BOTH, expand=True)
         
         # Subtitle tracks
         subtitle_frame = ttk.LabelFrame(self.encode_frame, text="Subtitle Tracks", padding=10)
         subtitle_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        self.subtitle_listbox = tk.Listbox(subtitle_frame, selectmode=tk.MULTIPLE, height=4)
+        self.subtitle_listbox = tk.Listbox(subtitle_frame, selectmode=tk.MULTIPLE, height=4, exportselection=False)
         self.subtitle_listbox.pack(fill=tk.BOTH, expand=True)
         
         # Chapters
@@ -457,7 +679,7 @@ class DiscRipperGUI:
         self.reencode_button.pack(side=tk.LEFT, padx=5)
         
         # Check for existing ripped file on tab change
-        self.root.nametowidget(".!notebook").bind("<<NotebookTabChanged>>", lambda e: self.check_ripped_file())
+        self.notebook.bind("<<NotebookTabChanged>>", lambda e: self.check_ripped_file())
     
     def setup_output_tab(self):
         """Setup output and progress tab"""
@@ -466,7 +688,7 @@ class DiscRipperGUI:
         progress_frame.pack(fill=tk.X, padx=10, pady=10)
         
         self.progress_var = tk.DoubleVar()
-        self.progress_bar = ttk.Progressbar(progress_frame, variable=self.progress_var, 
+        self.progress_bar = ttk.Progressbar(progress_frame, variable=self.progress_var,
                                            maximum=100)
         self.progress_bar.pack(fill=tk.X, pady=5)
         
@@ -481,7 +703,7 @@ class DiscRipperGUI:
         ttk.Label(log_header_frame, text="Log", font=('', 10, 'bold')).pack(side=tk.LEFT, padx=5)
         
         self.log_expanded = tk.BooleanVar(value=True)
-        self.log_toggle_button = ttk.Button(log_header_frame, text="Hide", 
+        self.log_toggle_button = ttk.Button(log_header_frame, text="Hide",
                                            command=self.toggle_log, width=10)
         self.log_toggle_button.pack(side=tk.RIGHT, padx=5)
         
@@ -491,6 +713,41 @@ class DiscRipperGUI:
         
         self.log_text = scrolledtext.ScrolledText(self.log_frame, height=20, wrap=tk.WORD)
         self.log_text.pack(fill=tk.BOTH, expand=True)
+
+    def setup_plex_sync_tab(self):
+        """Setup Plex Sync tab for batch copying local outputs to Plex."""
+        top = ttk.Frame(self.plex_frame)
+        top.pack(fill=tk.X, padx=10, pady=10)
+
+        ttk.Label(top, text="Pending files (local outputs not yet copied)", font=('', 11, 'bold')).pack(side=tk.LEFT)
+
+        ttk.Button(top, text="Refresh", command=self.refresh_plex_queue).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(top, text="Copy Selected to Plex", command=self.copy_selected_to_plex).pack(side=tk.RIGHT, padx=5)
+
+        tree_frame = ttk.Frame(self.plex_frame)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        self.plex_queue_tree = ttk.Treeview(tree_frame, columns=("Size", "Resolution", "Destination"), show="tree headings", selectmode="extended")
+        self.plex_queue_tree.heading("#0", text="File")
+        self.plex_queue_tree.heading("Size", text="Size")
+        self.plex_queue_tree.heading("Resolution", text="Resolution")
+        self.plex_queue_tree.heading("Destination", text="Destination")
+
+        self.plex_queue_tree.column("#0", width=360)
+        self.plex_queue_tree.column("Size", width=100)
+        self.plex_queue_tree.column("Resolution", width=110)
+        self.plex_queue_tree.column("Destination", width=140)
+
+        yscroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.plex_queue_tree.yview)
+        self.plex_queue_tree.configure(yscrollcommand=yscroll.set)
+
+        self.plex_queue_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        yscroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.plex_queue_paths = {}
+
+        # Initial load
+        self.refresh_plex_queue()
     
     def toggle_log(self):
         """Toggle log visibility"""
@@ -510,6 +767,284 @@ class DiscRipperGUI:
         self.log_text.insert(tk.END, message + "\n")
         self.log_text.see(tk.END)
         self.root.update_idletasks()
+
+    def format_bytes(self, num_bytes: int) -> str:
+        if num_bytes is None:
+            return ""
+        size = float(num_bytes)
+        for unit in ["B", "KB", "MB", "GB", "TB"]:
+            if size < 1024.0:
+                return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} {unit}"
+            size /= 1024.0
+        return f"{size:.1f} PB"
+
+    def sanitize_path_component(self, name: str) -> str:
+        """Sanitize a movie name for use as a folder/file name."""
+        if not name:
+            return "Movie"
+        # Replace path separators and other problematic characters.
+        name = name.replace("/", "-").replace("\\", "-")
+        name = re.sub(r'[:\n\r\t]+', ' ', name)
+        name = re.sub(r'\s+', ' ', name).strip()
+        return name
+
+    def get_video_dimensions(self, video_file: Path) -> Tuple[Optional[int], Optional[int]]:
+        """Return (width, height) for the first video stream."""
+        if not video_file or not video_file.exists():
+            return (None, None)
+
+        # Prefer ffprobe.
+        if getattr(self, 'ffprobe_path', None):
+            try:
+                cmd = [
+                    self.ffprobe_path, "-v", "error",
+                    "-select_streams", "v:0",
+                    "-show_entries", "stream=width,height",
+                    "-of", "json",
+                    str(video_file)
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+                if result.returncode == 0:
+                    data = json.loads(result.stdout)
+                    streams = data.get("streams") or []
+                    if streams:
+                        w = streams[0].get("width")
+                        h = streams[0].get("height")
+                        return (int(w) if w else None, int(h) if h else None)
+            except Exception:
+                pass
+
+        # Fallback: parse ffmpeg -i output.
+        try:
+            if self.ffmpeg_path:
+                cmd = [self.ffmpeg_path, "-i", str(video_file), "-hide_banner"]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+                out = result.stderr or ""
+                # Find first Video stream line containing 1234x567
+                for line in out.split("\n"):
+                    if "Video:" in line:
+                        m = re.search(r'(\d{3,5})x(\d{3,5})', line)
+                        if m:
+                            return (int(m.group(1)), int(m.group(2)))
+        except Exception:
+            pass
+
+        return (None, None)
+
+    def is_4k_by_dimensions(self, width: Optional[int], height: Optional[int]) -> bool:
+        if width is None or height is None:
+            return False
+        return height >= 2000 or width >= 3800
+
+    def ensure_smb_mounted_if_needed(self) -> None:
+        """Optionally mount the SMB share only when performing a copy.
+
+        We never mount on startup; this is only attempted if the user enabled it.
+        """
+        if not self.settings.get("plex_smb_auto_mount_on_copy"):
+            return
+
+        smb_url = (self.settings.get("plex_smb_url") or "").strip()
+        username = (self.settings.get("plex_smb_username") or "").strip()
+        use_pw = bool(self.settings.get("plex_smb_use_keychain_password"))
+        if not smb_url:
+            return
+
+        # If at least one destination exists, don't force mount.
+        p1080_s = (self.settings.get("plex_movies_1080p_path") or "").strip()
+        p4k_s = (self.settings.get("plex_movies_4k_path") or "").strip()
+        p1080 = Path(p1080_s) if p1080_s else None
+        p4k = Path(p4k_s) if p4k_s else None
+        if (p1080 and p1080.exists()) or (p4k and p4k.exists()):
+            return
+
+        self.log(f"Plex destination not mounted. Attempting SMB mount for: {smb_url}")
+
+        try:
+            if use_pw and username:
+                pw = self.get_plex_smb_password() or ""
+                if not pw:
+                    self.log("SMB password not available in Keychain; cannot auto-mount")
+                    return
+                # Use AppleScript to mount with credentials.
+                script = f'mount volume "{smb_url}" as user name "{username}" with password "{pw}"'
+                subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+            else:
+                # Let macOS/Keychain handle credentials (may prompt if not saved).
+                subprocess.run(["open", smb_url], capture_output=True, text=True, timeout=30)
+        except Exception as e:
+            self.log(f"SMB mount attempt failed: {e}")
+            return
+
+        # Give Finder a moment to mount.
+        time.sleep(2)
+
+    def get_plex_destination_root_for_file(self, video_file: Path) -> Tuple[Optional[Path], str]:
+        """Return (dest_root, label) based on output resolution."""
+        p1080_s = (self.settings.get("plex_movies_1080p_path") or "").strip()
+        p4k_s = (self.settings.get("plex_movies_4k_path") or "").strip()
+        p1080 = Path(p1080_s) if p1080_s else None
+        p4k = Path(p4k_s) if p4k_s else None
+
+        w, h = self.get_video_dimensions(video_file)
+        if self.is_4k_by_dimensions(w, h):
+            return (p4k, "4K Movies")
+        return (p1080, "Movies")
+
+    def build_plex_destination_path(self, dest_root: Path, movie_name: str) -> Path:
+        safe_name = self.sanitize_path_component(movie_name)
+        if self.settings.get("plex_folder_per_movie", True):
+            return dest_root / safe_name / f"{safe_name}.mkv"
+        return dest_root / f"{safe_name}.mkv"
+
+    def copy_with_progress(self, src: Path, dst: Path, overall_base: float, overall_span: float, overwrite: bool) -> str:
+        """Copy src -> dst with chunked progress.
+
+        Returns: "copied" | "skipped"
+        """
+        if dst.exists() and not overwrite:
+            return "skipped"
+
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dst.with_suffix(dst.suffix + ".partial")
+
+        total = src.stat().st_size
+        copied = 0
+        last_ui = 0.0
+
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+
+        with open(src, "rb") as fsrc, open(tmp, "wb") as fdst:
+            while True:
+                buf = fsrc.read(8 * 1024 * 1024)  # 8MB chunks
+                if not buf:
+                    break
+                fdst.write(buf)
+                copied += len(buf)
+
+                now = time.time()
+                if now - last_ui > 0.25:
+                    pct = (copied / total) * 100 if total else 100
+                    overall = overall_base + (pct / 100.0) * overall_span
+                    self.progress_var.set(overall)
+                    self.progress_label.config(text=f"Copying to Plex - {int(overall)}%")
+                    self.root.update_idletasks()
+                    last_ui = now
+
+        # Verify size at minimum
+        if tmp.stat().st_size != total:
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+            raise Exception("Copy verification failed (size mismatch)")
+
+        # Atomic replace to final path
+        os.replace(tmp, dst)
+        return "copied"
+
+    def copy_file_to_plex(self, local_file: Path, overall_base: float = 0.0, overall_span: float = 100.0) -> Tuple[bool, Optional[Path]]:
+        """Copy a local encoded file into the appropriate Plex destination.
+
+        Returns (success, destination_path).
+        If collision policy is skip and destination exists, returns (False, destination_path).
+        """
+        if not local_file.exists():
+            raise Exception(f"Local file not found: {local_file}")
+
+        movie_name = local_file.stem
+
+        # Try to mount share only if user opted in.
+        self.ensure_smb_mounted_if_needed()
+
+        dest_root, dest_label = self.get_plex_destination_root_for_file(local_file)
+        if not dest_root or not str(dest_root):
+            raise Exception("Plex destination folders not configured. Use Settings → Plex Settings.")
+
+        if not dest_root.exists():
+            raise Exception(f"Plex destination not available: {dest_root}")
+
+        dest_path = self.build_plex_destination_path(dest_root, movie_name)
+        overwrite = (self.settings.get("plex_collision_policy") == "overwrite")
+
+        if dest_path.exists() and not overwrite:
+            self.log(f"Skip: destination exists ({dest_label}): {dest_path}")
+            return (False, dest_path)
+
+        self.log(f"Copying to Plex ({dest_label}): {dest_path}")
+        result = self.copy_with_progress(local_file, dest_path, overall_base, overall_span, overwrite=overwrite)
+        if result == "skipped":
+            self.log(f"Skip: destination exists: {dest_path}")
+            return (False, dest_path)
+
+        self.log(f"Copied OK: {dest_path}")
+
+        # Optionally delete local file after copy
+        if self.settings.get("plex_delete_local_after_copy", True):
+            try:
+                local_file.unlink()
+                self.log(f"Deleted local output: {local_file.name}")
+            except Exception as e:
+                self.log(f"Warning: failed to delete local output: {e}")
+
+        return (True, dest_path)
+
+    def refresh_plex_queue(self):
+        """Scan local output folder for MKVs that haven't been copied yet (still present locally)."""
+        # Clear
+        for child in self.plex_queue_tree.get_children():
+            self.plex_queue_tree.delete(child)
+        self.plex_queue_paths = {}
+
+        output_dir = Path(self.output_folder_var.get()) if hasattr(self, 'output_folder_var') else None
+        if not output_dir or not output_dir.exists():
+            return
+
+        mkvs = sorted([p for p in output_dir.glob("*.mkv") if p.is_file()])
+        for idx, f in enumerate(mkvs):
+            size = f.stat().st_size
+            w, h = self.get_video_dimensions(f)
+            res = f"{w}x{h}" if w and h else "Unknown"
+            _, dest_label = self.get_plex_destination_root_for_file(f)
+
+            iid = str(idx)
+            self.plex_queue_tree.insert("", tk.END, iid=iid, text=f.name,
+                                        values=(self.format_bytes(size), res, dest_label))
+            self.plex_queue_paths[iid] = str(f)
+
+    def copy_selected_to_plex(self):
+        selected = list(self.plex_queue_tree.selection())
+        if not selected:
+            messagebox.showinfo("Plex Sync", "Select one or more files to copy.")
+            return
+
+        files = [Path(self.plex_queue_paths[i]) for i in selected if i in self.plex_queue_paths]
+        total_bytes = sum((f.stat().st_size for f in files if f.exists()), 0)
+
+        if not messagebox.askyesno(
+            "Confirm",
+            f"Copy {len(files)} file(s) to Plex?\nTotal size: {self.format_bytes(total_bytes)}\n\nFiles will be deleted locally after successful copy (if enabled in Plex Settings)."
+        ):
+            return
+
+        def worker():
+            try:
+                for i, f in enumerate(files):
+                    # Use 0-100 progress per file in the batch.
+                    self.progress_var.set(0)
+                    self.progress_label.config(text="Copying to Plex - 0%")
+                    self.copy_file_to_plex(f, overall_base=0.0, overall_span=100.0)
+                self.log("Plex batch copy complete.")
+            except Exception as e:
+                self.log(f"Plex batch copy error: {e}")
+            finally:
+                self.refresh_plex_queue()
+
+        threading.Thread(target=worker, daemon=True).start()
     
     def scan_disc(self):
         """Scan for disc using MakeMKV"""
@@ -540,6 +1075,15 @@ class DiscRipperGUI:
                     return
                 
                 self.parse_disc_info(result.stdout)
+                
+                # Log a brief summary so we can debug discs where stream parsing differs
+                try:
+                    titles_count = len(getattr(self, 'disc_info', {}) or {})
+                    tracks_count = len(getattr(self, 'tracks_info', {}) or {})
+                    self.log(f"Scan summary: {titles_count} titles, stream info for {tracks_count} titles")
+                except Exception:
+                    pass
+                
                 self.log("Disc scan complete!")
                 self.progress_label.config(text="Scan complete")
             except subprocess.TimeoutExpired:
@@ -553,6 +1097,23 @@ class DiscRipperGUI:
         
         threading.Thread(target=scan_thread, daemon=True).start()
     
+    def _parse_makemkv_value(self, raw: str) -> str:
+        """Parse MakeMKV 'rest' field.
+
+        MakeMKV often formats fields as: 0,"Some Value". We want the actual string value.
+        """
+        if raw is None:
+            return ""
+        raw = raw.strip()
+        # Prefer quoted payload if present.
+        m = re.search(r'"(.*?)"', raw)
+        if m:
+            return m.group(1).strip()
+        # Fallback: take the last comma-delimited token.
+        if "," in raw:
+            return raw.split(",")[-1].strip().strip('"')
+        return raw.strip().strip('"')
+
     def parse_disc_info(self, output: str):
         """Parse MakeMKV output to extract title information"""
         self.title_tree.delete(*self.title_tree.get_children())
@@ -568,7 +1129,7 @@ class DiscRipperGUI:
                 if len(parts) >= 4:
                     title_id = parts[0].split(":")[1]
                     attr_id = parts[1]
-                    value = parts[3].strip('"')
+                    value = self._parse_makemkv_value(parts[3])
                     
                     if title_id not in titles:
                         titles[title_id] = {}
@@ -590,7 +1151,7 @@ class DiscRipperGUI:
                     title_id = parts[0].split(":")[1]
                     stream_id = parts[1]
                     attr_id = parts[2]
-                    value = parts[3].strip('"')
+                    value = self._parse_makemkv_value(parts[3])
                     
                     if title_id not in tracks:
                         tracks[title_id] = {}
@@ -676,7 +1237,7 @@ class DiscRipperGUI:
                 threading.Thread(target=self.auto_search_movie, args=(disc_name,), daemon=True).start()
         
         # Switch to encoding tab
-        self.root.nametowidget(".!notebook").select(1)
+        self.notebook.select(self.encode_frame)
     
     def format_language(self, language: str, lang_code: str = "") -> str:
         """Format language name nicely"""
@@ -769,17 +1330,16 @@ class DiscRipperGUI:
             audio_count = 0
             subtitle_count = 0
             
-            for stream_id, stream_info in sorted(title_tracks.items()):
-                stream_type = stream_info.get("type", "")
-                raw_codec = stream_info.get("codec", "Unknown")
-                raw_language = stream_info.get("language", "Unknown")
-                raw_lang_code = stream_info.get("lang_code", "")
+            for stream_id, stream_info in sorted(title_tracks.items(), key=lambda kv: int(kv[0])):
+                stream_type = (stream_info.get("type", "") or "").strip()
+                codec_long = (stream_info.get("codec", "") or "").strip()
+                codec_short = (stream_info.get("codec_short", "") or "").strip()
+                language = (stream_info.get("language", "") or "").strip()
+                lang_code = (stream_info.get("lang_code", "") or "").strip()
                 
-                # MakeMKV has fields swapped: "codec" field contains language, "language" field contains codec
-                # Also strip the "0," prefix and quotes
-                language = raw_codec.split(',"')[-1].strip('"').strip() if '"' in raw_codec else raw_codec
-                codec = raw_language.split(',"')[-1].strip('"').strip() if '"' in raw_language else raw_language
-                lang_code = raw_lang_code.split(',"')[-1].strip('"').strip() if '"' in raw_lang_code else raw_lang_code
+                # Prefer short codec if present (e.g. dts, truehd), else long codec name.
+                codec = codec_short if codec_short else (codec_long if codec_long else "Unknown")
+                language = language if language else "Unknown"
                 
                 # Debug: Log first few streams
                 if int(stream_id) < 5:
@@ -858,6 +1418,18 @@ class DiscRipperGUI:
                     self.subtitle_tracks.append({"id": stream_id, "language": language, "codec": codec})
             
             self.log(f"Found {audio_count} audio tracks, {subtitle_count} subtitle tracks")
+            
+            # Safety net: if parsing produced streams but none matched audio/subtitle,
+            # fall back to auto-detection rather than showing empty lists.
+            if audio_count == 0:
+                self.log("Warning: No audio tracks detected from disc scan; falling back to auto-detect")
+                self.audio_listbox.insert(tk.END, "All audio tracks (will be auto-detected)")
+                # Do not auto-select; if nothing is selected we map all audio.
+                self.audio_tracks = [{"id": "all", "language": "all", "codec": "auto"}]
+            if subtitle_count == 0:
+                self.log("Warning: No subtitle tracks detected from disc scan; falling back to auto-detect")
+                self.subtitle_listbox.insert(tk.END, "All subtitle tracks (will be auto-detected)")
+                self.subtitle_tracks = [{"id": "all", "language": "all", "codec": "auto"}]
         else:
             # Fallback: MakeMKV doesn't provide stream details, add generic options
             self.log("Note: Stream details not available from disc scan")
@@ -865,7 +1437,7 @@ class DiscRipperGUI:
             
             # Add generic placeholder
             self.audio_listbox.insert(tk.END, "All audio tracks (will be auto-detected)")
-            self.audio_listbox.selection_set(0)
+            # Do not auto-select; if nothing is selected we map all audio.
             self.audio_tracks = [{"id": "all", "language": "all", "codec": "auto"}]
             
             self.subtitle_listbox.insert(tk.END, "All subtitle tracks (will be auto-detected)")
@@ -1060,7 +1632,7 @@ class DiscRipperGUI:
             return
         
         # Switch to progress tab
-        self.root.nametowidget(".!notebook").select(2)
+        self.notebook.select(self.output_frame)
         
         def encode_thread():
             try:
@@ -1086,7 +1658,7 @@ class DiscRipperGUI:
             return
         
         # Switch to progress tab
-        self.root.nametowidget(".!notebook").select(2)
+        self.notebook.select(self.output_frame)
         
         def encode_thread():
             try:
@@ -1171,9 +1743,20 @@ class DiscRipperGUI:
         self.progress_var.set(50)
         
         output_file = output_folder / f"{movie_name}.mkv"
+
+        # Handle existing output file to avoid ffmpeg prompt in .app bundle
+        overwrite_output = False
+        if output_file.exists():
+            overwrite_output = messagebox.askyesno(
+                "Output Exists",
+                f"Output file already exists:\n{output_file}\n\nOverwrite it?"
+            )
+            if not overwrite_output:
+                self.log(f"Output exists, skipping encode: {output_file}")
+                raise Exception("Output file already exists (skipped)")
         
         # Build FFmpeg command
-        cmd = [self.ffmpeg_path, "-i", str(input_file)]
+        cmd = [self.ffmpeg_path, "-y" if overwrite_output else "-n", "-i", str(input_file)]
         
         # Map video stream
         cmd.extend(["-map", "0:v:0"])
@@ -1250,16 +1833,22 @@ class DiscRipperGUI:
         selected_audio = self.audio_listbox.curselection()
         
         if selected_audio:
-            # Map selected audio streams
-            for idx in selected_audio:
-                cmd.extend(["-map", f"0:a:{idx}"])
+            # If we couldn't enumerate tracks at scan-time we insert a single placeholder.
+            # Treat selecting it as "include all audio".
+            if len(getattr(self, 'audio_tracks', [])) == 1 and self.audio_tracks[0].get("id") == "all":
+                cmd.extend(["-map", "0:a"])  # Include all audio
+            else:
+                # Map selected audio streams by index
+                for idx in selected_audio:
+                    cmd.extend(["-map", f"0:a:{idx}"])
         else:
             cmd.extend(["-map", "0:a"])  # Include all audio
         
         # Determine audio codec strategy
-        high_quality_codecs = ["dts", "truehd", "eac3", "ac3", "dtshd"]
-        has_hq_audio = any(codec.lower() in audio_info.get("codecs", []) 
-                          for codec in high_quality_codecs)
+        # Note: audio_info['codecs'] are strings like "dts (dca) (dts-hd ma)"; use substring matching.
+        high_quality_codecs = ["dts", "truehd", "eac3", "ac3", "dtshd", "dts-hd"]
+        detected_codecs = [c.lower() for c in (audio_info.get("codecs") or [])]
+        has_hq_audio = any(any(hq in c for hq in high_quality_codecs) for c in detected_codecs)
         
         if has_hq_audio:
             self.log(f"Detected high-quality audio ({', '.join(audio_info.get('codecs', []))}) - copying")
@@ -1271,10 +1860,16 @@ class DiscRipperGUI:
         # Subtitles - only include selected tracks
         selected_subs = self.subtitle_listbox.curselection()
         if selected_subs:
-            # Map each selected subtitle stream individually and ignore if it doesn't exist
-            for idx in selected_subs:
-                cmd.extend(["-map", f"0:s:{idx}?"])  # The ? makes it optional
-            cmd.extend(["-c:s", "copy"])
+            # If we couldn't enumerate tracks at scan-time we insert a single placeholder.
+            # Treat selecting it as "include all subtitles".
+            if len(getattr(self, 'subtitle_tracks', [])) == 1 and self.subtitle_tracks[0].get("id") == "all":
+                cmd.extend(["-map", "0:s?"])  # Include all subtitle streams (optional if none exist)
+                cmd.extend(["-c:s", "copy"])
+            else:
+                # Map each selected subtitle stream individually and ignore if it doesn't exist
+                for idx in selected_subs:
+                    cmd.extend(["-map", f"0:s:{idx}?"])  # The ? makes it optional
+                cmd.extend(["-c:s", "copy"])
         # If no subtitles selected, don't include any
         
         # Output
@@ -1304,7 +1899,7 @@ class DiscRipperGUI:
                     h, m, s = map(int, match.groups())
                     current = h * 3600 + m * 60 + s
                     progress = (current / duration) * 100
-                    overall = int(50 + progress * 0.5)  # 50-100%
+                    overall = int(50 + progress * 0.45)  # 50-95% (leave room for Plex copy)
                     self.progress_var.set(overall)
                     # Calculate ETA
                     elapsed = current
@@ -1321,17 +1916,47 @@ class DiscRipperGUI:
         
         if process.returncode != 0:
             raise Exception("FFmpeg encoding failed")
+
+        # Verify output was actually created
+        if not output_file.exists() or output_file.stat().st_size == 0:
+            raise Exception("FFmpeg did not produce an output file")
         
+        # Encoding complete (leave headroom for optional Plex copy)
+        self.progress_var.set(95)
+        self.progress_label.config(text="Encoding complete - 95%")
+
+        plex_dest = None
+        if self.settings.get("plex_auto_copy_after_encode"):
+            try:
+                self.log("Starting Plex copy...")
+                ok, dest_path = self.copy_file_to_plex(output_file, overall_base=95.0, overall_span=5.0)
+                plex_dest = dest_path
+                if ok:
+                    self.progress_var.set(100)
+                    self.progress_label.config(text="Complete - 100%")
+                else:
+                    # Skipped due to collision policy
+                    self.progress_var.set(95)
+                    self.progress_label.config(text="Plex copy skipped - 95%")
+            except Exception as e:
+                self.log(f"Plex copy failed: {e}")
+                self.progress_var.set(95)
+                self.progress_label.config(text="Plex copy failed - 95%")
+        else:
+            self.progress_var.set(100)
+            self.progress_label.config(text="Complete - 100%")
+
         # Success - keep temp file for potential re-encoding
         self.log(f"\n✓ Complete! Output: {output_file}")
         self.log(f"Temp file kept at: {input_file} (for re-encoding with different settings)")
-        self.progress_label.config(text="Complete - 100%")
-        self.progress_var.set(100)
-        
+
         # Update ripped file status
         self.check_ripped_file()
-        
-        messagebox.showinfo("Success", f"Encoding complete!\n\nOutput: {output_file}\n\nTip: You can re-encode with different settings using 'Re-encode Only' button.")
+
+        if plex_dest:
+            messagebox.showinfo("Success", f"Encoding complete!\n\nPlex destination: {plex_dest}\n\nTip: You can batch-copy any remaining local outputs from the Plex Sync tab.")
+        else:
+            messagebox.showinfo("Success", f"Encoding complete!\n\nOutput: {output_file}\n\nTip: You can re-encode with different settings using 'Re-encode Only' button.")
 
 
 def main():

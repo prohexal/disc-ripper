@@ -16,6 +16,13 @@ A GUI application for ripping Blu-ray/DVD discs using MakeMKV and encoding them 
 - 🚀 **AV1 Encoding**: High-efficiency AV1 video codec with SVT-AV1 encoder
 - 📝 **Real-time Progress**: Live progress tracking and detailed logging
 - 🖥️ **Detached Mode**: Runs independently from terminal
+- ♻️ **Re-encode Only**: Re-encode existing rip without re-ripping
+- ⚡ **Hardware Encode**: VideoToolbox H.265 preset for fast encoding
+- 📦 **Plex Integration**: Resolution-based routing to Movies vs 4K Movies
+- 🔁 **Auto-copy + Cleanup**: Auto-copy to Plex after encode with optional local delete
+- 🧩 **Collision Policy**: Skip or overwrite existing Plex files
+- 🗂️ **Plex Sync Tab**: Batch copy pending outputs
+- 🔐 **SMB Auto-mount**: Optional SMB mount using Keychain-stored password
 
 ## Requirements
 
@@ -23,8 +30,10 @@ A GUI application for ripping Blu-ray/DVD discs using MakeMKV and encoding them 
 - Python 3.11 or later
 - MakeMKV (auto-installer provided)
 - FFmpeg with AV1 support (install via Homebrew)
+- FFprobe (recommended for resolution detection)
 - Homebrew (recommended for installing FFmpeg and Python)
 - TMDb API key (optional, for metadata and cover art)
+- Java Runtime (optional, required for some Blu-ray discs with BD-Java)
 
 ## Installation
 
@@ -47,8 +56,7 @@ Using Homebrew (recommended):
 ```bash
 brew install ffmpeg
 ```
-
-This will install FFmpeg with SVT-AV1 encoder support.
+This will install FFmpeg (and FFprobe) with SVT-AV1 encoder support.
 
 ### 3. Set Up TMDb API (Optional)
 
@@ -98,6 +106,11 @@ cd ~/codeRepo/disc-ripper
 ```bash
 /opt/homebrew/bin/python3.11 ~/codeRepo/disc-ripper/disc_ripper.py
 ```
+**Build the macOS app bundle (.app):**
+```bash
+/opt/homebrew/bin/python3.11 -m PyInstaller ~/codeRepo/disc-ripper/DiscRipper.spec --clean --noconfirm
+```
+The app bundle will be in `dist/DiscRipper.app`.
 
 ### Workflow
 
@@ -125,6 +138,11 @@ cd ~/codeRepo/disc-ripper
    - View detailed logs of the process
    - Get notification when complete
 
+5. **Plex Sync** (Tab 4, optional):
+   - Configure destinations in Settings → Plex Settings
+   - Auto-copy after encode (optional)
+   - Batch copy pending files to Plex
+
 ### Output
 
 The final file will be saved as:
@@ -139,6 +157,8 @@ With:
 - **HDR/DV**: Metadata automatically preserved
 - **Container**: MKV format
 - **Chapters**: Optional chapter markers
+
+If auto-copy to Plex is enabled, the file will be copied to the configured Plex destination and can be deleted locally after a successful copy (depending on settings).
 
 ## Configuration
 
@@ -158,6 +178,19 @@ The application intelligently handles encoding based on source content:
 **Subtitles:**
 - All selected subtitle tracks are copied without modification
 
+### Plex Integration
+
+Configure in Settings → Plex Settings:
+- **Movies (1080p and below)** destination path
+- **4K Movies** destination path
+- **Collision policy**: skip or overwrite
+- **Auto-copy after encode** and **delete local after copy**
+- **Optional SMB auto-mount** with Keychain-stored password
+
+Resolution-based routing:
+- Height ≥ 2000 or width ≥ 3800 → 4K Movies
+- Otherwise → Movies
+
 ### MakeMKV Drive Selection
 
 If you have multiple drives, change the drive number in Tab 1 (default is 0).
@@ -171,11 +204,17 @@ If you have multiple drives, change the drive number in Tab 1 (default is 0).
 ### "FFmpeg not found"
 - Install FFmpeg using: `brew install ffmpeg`
 - Verify installation: `which ffmpeg`
+### Output file already exists
+- The app will prompt to overwrite or skip the encode
 
 ### "No disc inserted" error
 - Ensure disc is fully inserted and recognized by macOS
 - Try incrementing the drive number (1, 2, etc.)
 - Check Disk Utility to see if the disc is mounted
+
+### MakeMKV says Java runtime is required
+- Some Blu-ray discs use BD-Java for playlist selection or protection
+- Install a Java Runtime Environment (JRE), or set the Java path in MakeMKV preferences
 
 ### Slow encoding
 - AV1 encoding is computationally intensive
